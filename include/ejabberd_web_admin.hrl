@@ -1,6 +1,6 @@
 %%%----------------------------------------------------------------------
 %%%
-%%% ejabberd, Copyright (C) 2002-2015   ProcessOne
+%%% ejabberd, Copyright (C) 2002-2022   ProcessOne
 %%%
 %%% This program is free software; you can redistribute it and/or
 %%% modify it under the terms of the GNU General Public License as
@@ -37,14 +37,12 @@
 -define(XAC(Name, Attrs, Text),
 	?XAE(Name, Attrs, [?C(Text)])).
 
--define(T(Text), translate:translate(Lang, Text)).
+-define(CT(Text), ?C((translate:translate(Lang, Text)))).
 
--define(CT(Text), ?C((?T(Text)))).
-
--define(XCT(Name, Text), ?XC(Name, (?T(Text)))).
+-define(XCT(Name, Text), ?XC(Name, (translate:translate(Lang, Text)))).
 
 -define(XACT(Name, Attrs, Text),
-	?XAC(Name, Attrs, (?T(Text)))).
+	?XAC(Name, Attrs, (translate:translate(Lang, Text)))).
 
 -define(LI(Els), ?XE(<<"li">>, Els)).
 
@@ -53,7 +51,7 @@
 
 -define(AC(URL, Text), ?A(URL, [?C(Text)])).
 
--define(ACT(URL, Text), ?AC(URL, (?T(Text)))).
+-define(ACT(URL, Text), ?AC(URL, (translate:translate(Lang, Text)))).
 
 -define(P, ?X(<<"p">>)).
 
@@ -65,7 +63,15 @@
 	     {<<"value">>, Value}])).
 
 -define(INPUTT(Type, Name, Value),
-	?INPUT(Type, Name, (?T(Value)))).
+	?INPUT(Type, Name, (translate:translate(Lang, Value)))).
+
+-define(INPUTD(Type, Name, Value),
+	?XA(<<"input">>,
+	    [{<<"type">>, Type}, {<<"name">>, Name},
+             {<<"class">>, <<"btn-danger">>}, {<<"value">>, Value}])).
+
+-define(INPUTTD(Type, Name, Value),
+	?INPUTD(Type, Name, (translate:translate(Lang, Value)))).
 
 -define(INPUTS(Type, Name, Value, Size),
 	?XA(<<"input">>,
@@ -73,7 +79,7 @@
 	     {<<"value">>, Value}, {<<"size">>, Size}])).
 
 -define(INPUTST(Type, Name, Value, Size),
-	?INPUT(Type, Name, (?T(Value)), Size)).
+	?INPUT(Type, Name, (translate:translate(Lang, Value)), Size)).
 
 -define(ACLINPUT(Text),
 	?XE(<<"td">>,
@@ -90,14 +96,14 @@
 	?XAC(<<"p">>, [{<<"class">>, <<"result">>}], Text)).
 
 %% Guide Link
--define(XREST(Text), ?XRES((?T(Text)))).
+-define(XREST(Text), ?XRES((translate:translate(Lang, Text)))).
 
 -define(GL(Ref, Title),
 	?XAE(<<"div">>, [{<<"class">>, <<"guidelink">>}],
 	     [?XAE(<<"a">>,
-		   [{<<"href">>, <<"/admin/doc/guide.html#", Ref/binary>>},
+		   [{<<"href">>, <<"https://docs.ejabberd.im/admin/configuration/", Ref/binary>>},
 		    {<<"target">>, <<"_blank">>}],
-		   [?C(<<"[Guide: ", Title/binary, "]">>)])])).
+		   [?C(<<"docs: ", Title/binary>>)])])).
 
 %% h1 with a Guide Link
 -define(H1GL(Name, Ref, Title),

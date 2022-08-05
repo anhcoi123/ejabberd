@@ -1,12 +1,11 @@
 %%%-------------------------------------------------------------------
-%%% @author Evgeny Khramtsov <ekhramtsov@process-one.net>
-%%% @copyright (C) 2014, Evgeny Khramtsov
-%%% @doc
-%%%
-%%% @end
+%%% File    : mod_sip_proxy.erl
+%%% Author  : Evgeny Khramtsov <ekhramtsov@process-one.net>
+%%% Purpose :
 %%% Created : 21 Apr 2014 by Evgeny Khramtsov <ekhramtsov@process-one.net>
 %%%
-%%% ejabberd, Copyright (C) 2014-2015   ProcessOne
+%%%
+%%% ejabberd, Copyright (C) 2014-2022   ProcessOne
 %%%
 %%% This program is free software; you can redistribute it and/or
 %%% modify it under the terms of the GNU General Public License as
@@ -21,22 +20,24 @@
 %%% You should have received a copy of the GNU General Public License along
 %%% with this program; if not, write to the Free Software Foundation, Inc.,
 %%% 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
-
+%%%
 %%%-------------------------------------------------------------------
+
 -module(mod_sip_proxy).
 
--define(GEN_FSM, p1_fsm).
--behaviour(?GEN_FSM).
+-ifndef(SIP).
+-export([]).
+-else.
+-behaviour(p1_fsm).
 
 %% API
 -export([start/2, start_link/2, route/3, route/4]).
 
-%% gen_fsm callbacks
--export([init/1, wait_for_request/2, wait_for_response/2,
-	 handle_event/3, handle_sync_event/4,
-	 handle_info/3, terminate/3, code_change/4]).
+-export([init/1, wait_for_request/2,
+	 wait_for_response/2, handle_event/3,
+	 handle_sync_event/4, handle_info/3, terminate/3,
+	 code_change/4]).
 
--include("ejabberd.hrl").
 -include("logger.hrl").
 -include_lib("esip/include/esip.hrl").
 
@@ -47,7 +48,7 @@
 		orig_trid,
 		responses = [] :: [#sip{}],
 		tr_ids = []    :: list(),
-		orig_req       :: #sip{}}).
+		orig_req = #sip{} :: #sip{}}).
 
 %%%===================================================================
 %%% API
@@ -56,10 +57,10 @@ start(LServer, Opts) ->
     supervisor:start_child(mod_sip_proxy_sup, [LServer, Opts]).
 
 start_link(LServer, Opts) ->
-    ?GEN_FSM:start_link(?MODULE, [LServer, Opts], []).
+    p1_fsm:start_link(?MODULE, [LServer, Opts], []).
 
 route(SIPMsg, _SIPSock, TrID, Pid) ->
-    ?GEN_FSM:send_event(Pid, {SIPMsg, TrID}).
+    p1_fsm:send_event(Pid, {SIPMsg, TrID}).
 
 route(#sip{hdrs = Hdrs} = Req, LServer, Opts) ->
     case proplists:get_bool(authenticated, Opts) of
@@ -247,8 +248,8 @@ connect(#sip{hdrs = Hdrs} = Req, Opts) ->
     {_, ToURI, _} = esip:get_hdr('to', Hdrs),
     case mod_sip:at_my_host(ToURI) of
 	true ->
-	    LUser = jlib:nodeprep(ToURI#uri.user),
-	    LServer = jlib:nameprep(ToURI#uri.host),
+	    LUser = jid:nodeprep(ToURI#uri.user),
+	    LServer = jid:nameprep(ToURI#uri.host),
 	    case mod_sip_registrar:find_sockets(LUser, LServer) of
 		[_|_] = SIPSocks ->
 		    {ok, SIPSocks};
@@ -268,11 +269,10 @@ cancel_pending_transactions(State) ->
     lists:foreach(fun esip:cancel/1, State#state.tr_ids).
 
 add_certfile(LServer, Opts) ->
-    case ejabberd_config:get_option({domain_certfile, LServer},
-				    fun iolist_to_binary/1) of
-	CertFile when is_binary(CertFile), CertFile /= <<"">> ->
+    case ejabberd_pkix:get_certfile(LServer) of
+	{ok, CertFile} ->
 	    [{certfile, CertFile}|Opts];
-	_ ->
+	error ->
 	    Opts
     end.
 
@@ -297,8 +297,7 @@ add_record_route_and_set_uri(URI, LServer, #sip{hdrs = Hdrs} = Req) ->
 	    case need_record_route(LServer) of
 		true ->
 		    RR_URI = get_configured_record_route(LServer),
-		    {MSecs, Secs, _} = now(),
-		    TS = list_to_binary(integer_to_list(MSecs*1000000 + Secs)),
+		    TS = (integer_to_binary(erlang:system_time(second))),
 		    Sign = make_sign(TS, Hdrs),
 		    User = <<TS/binary, $-, Sign/binary>>,
 		    NewRR_URI = RR_URI#uri{user = User},
@@ -316,11 +315,7 @@ is_request_within_dialog(#sip{hdrs = Hdrs}) ->
     esip:has_param(<<"tag">>, Params).
 
 need_record_route(LServer) ->
-    gen_mod:get_module_opt(
-      LServer, mod_sip, always_record_route,
-      fun(true) -> true;
-	 (false) -> false
-      end, true).
+    mod_sip_opt:always_record_route(LServer).
 
 make_sign(TS, Hdrs) ->
     {_, #uri{user = FUser, host = FServer}, FParams} = esip:get_hdr('from', Hdrs),
@@ -331,16 +326,15 @@ make_sign(TS, Hdrs) ->
     LTServer = safe_nameprep(TServer),
     FromTag = esip:get_param(<<"tag">>, FParams),
     CallID = esip:get_hdr('call-id', Hdrs),
-    SharedKey = ejabberd_config:get_option(shared_key, fun(V) -> V end),
-    p1_sha:sha([SharedKey, LFUser, LFServer, LTUser, LTServer,
+    SharedKey = ejabberd_config:get_shared_key(),
+    str:sha([SharedKey, LFUser, LFServer, LTUser, LTServer,
 		FromTag, CallID, TS]).
 
 is_signed_by_me(TS_Sign, Hdrs) ->
     try
 	[TSBin, Sign] = str:tokens(TS_Sign, <<"-">>),
-	TS = list_to_integer(binary_to_list(TSBin)),
-	{MSecs, Secs, _} = now(),
-	NowTS = MSecs*1000000 + Secs,
+	TS = (binary_to_integer(TSBin)),
+	NowTS = erlang:system_time(second),
 	true = (NowTS - TS) =< ?SIGN_LIFETIME,
 	Sign == make_sign(TSBin, Hdrs)
     catch _:_ ->
@@ -348,41 +342,13 @@ is_signed_by_me(TS_Sign, Hdrs) ->
     end.
 
 get_configured_vias(LServer) ->
-    gen_mod:get_module_opt(
-      LServer, mod_sip, via,
-      fun(L) ->
-	      lists:map(
-		fun(Opts) ->
-			Type = proplists:get_value(type, Opts),
-			Host = proplists:get_value(host, Opts),
-			Port = proplists:get_value(port, Opts),
-			true = (Type == tcp) or (Type == tls) or (Type == udp),
-			true = is_binary(Host) and (Host /= <<"">>),
-			true = (is_integer(Port)
-				and (Port > 0) and (Port < 65536))
-			    or (Port == undefined),
-			{Type, {Host, Port}}
-		end, L)
-      end, []).
+    mod_sip_opt:via(LServer).
 
 get_configured_record_route(LServer) ->
-    gen_mod:get_module_opt(
-      LServer, mod_sip, record_route,
-      fun(IOList) ->
-	      S = iolist_to_binary(IOList),
-	      #uri{} = esip:decode_uri(S)
-      end, #uri{host = LServer, params = [{<<"lr">>, <<"">>}]}).
+    mod_sip_opt:record_route(LServer).
 
 get_configured_routes(LServer) ->
-    gen_mod:get_module_opt(
-      LServer, mod_sip, routes,
-      fun(L) ->
-	      lists:map(
-		fun(IOList) ->
-			S = iolist_to_binary(IOList),
-			#uri{} = esip:decode_uri(S)
-		end, L)
-      end, [#uri{host = LServer, params = [{<<"lr">>, <<"">>}]}]).
+    mod_sip_opt:routes(LServer).
 
 mark_transaction_as_complete(TrID, State) ->
     NewTrIDs = lists:delete(TrID, State#state.tr_ids),
@@ -410,7 +376,7 @@ choose_best_response(#state{responses = Responses} = State) ->
 
 %% Just compare host part only.
 cmp_uri(#uri{host = H1}, #uri{host = H2}) ->
-    jlib:nameprep(H1) == jlib:nameprep(H2).
+    jid:nameprep(H1) == jid:nameprep(H2).
 
 is_my_route(URI, URIs) ->
     lists:any(fun(U) -> cmp_uri(URI, U) end, URIs).
@@ -439,20 +405,22 @@ prepare_request(LServer, #sip{hdrs = Hdrs} = Req) ->
     Hdrs3 = lists:filter(
               fun({'proxy-authorization', {_, Params}}) ->
                       Realm = esip:unquote(esip:get_param(<<"realm">>, Params)),
-		      not mod_sip:is_my_host(jlib:nameprep(Realm));
+		      not mod_sip:is_my_host(jid:nameprep(Realm));
                  (_) ->
                       true
               end, Hdrs2),
     Req#sip{hdrs = Hdrs3}.
 
 safe_nodeprep(S) ->
-    case jlib:nodeprep(S) of
+    case jid:nodeprep(S) of
 	error -> S;
 	S1 -> S1
     end.
 
 safe_nameprep(S) ->
-    case jlib:nameprep(S) of
+    case jid:nameprep(S) of
 	error -> S;
 	S1 -> S1
     end.
+
+-endif.

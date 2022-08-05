@@ -5,7 +5,7 @@
 %%% Created :  2 Jan 2003 by Alexey Shchepin <alexey@process-one.net>
 %%%
 %%%
-%%% ejabberd, Copyright (C) 2002-2015   ProcessOne
+%%% ejabberd, Copyright (C) 2002-2022   ProcessOne
 %%%
 %%% This program is free software; you can redistribute it and/or
 %%% modify it under the terms of the GNU General Public License as
@@ -27,106 +27,165 @@
 
 -author('alexey@process-one.net').
 
+-protocol({xep, 54, '1.2'}).
+-protocol({xep, 55, '1.3'}).
+
+-behaviour(gen_server).
 -behaviour(gen_mod).
 
--export([start/2, init/3, stop/1, get_sm_features/5,
-	 process_local_iq/3, process_sm_iq/3, reindex_vcards/0,
-	 remove_user/2, export/1, import/1, import/3]).
+-export([start/2, stop/1, get_sm_features/5, mod_options/1, mod_doc/0,
+	 process_local_iq/1, process_sm_iq/1, string2lower/1,
+	 remove_user/2, export/1, import_info/0, import/5, import_start/2,
+	 depends/2, process_search/1, process_vcard/1, get_vcard/2,
+	 disco_items/5, disco_features/5, disco_identity/5,
+	 vcard_iq_set/1, mod_opt_type/1, set_vcard/3, make_vcard_search/4]).
+-export([init/1, handle_call/3, handle_cast/2,
+	 handle_info/2, terminate/2, code_change/3]).
+-export([route/1]).
 
--include("ejabberd.hrl").
 -include("logger.hrl").
+-include_lib("xmpp/include/xmpp.hrl").
+-include("mod_vcard.hrl").
+-include("translate.hrl").
+-include("ejabberd_stacktrace.hrl").
 
--include("jlib.hrl").
+-define(VCARD_CACHE, vcard_cache).
 
--define(JUD_MATCHES, 30).
+-callback init(binary(), gen_mod:opts()) -> any().
+-callback stop(binary()) -> any().
+-callback import(binary(), binary(), [binary()]) -> ok.
+-callback get_vcard(binary(), binary()) -> {ok, [xmlel()]} | error.
+-callback set_vcard(binary(), binary(),
+		    xmlel(), #vcard_search{}) -> {atomic, any()}.
+-callback search_fields(binary()) -> [{binary(), binary()}].
+-callback search_reported(binary()) -> [{binary(), binary()}].
+-callback search(binary(), [{binary(), [binary()]}], boolean(),
+		 infinity | pos_integer()) -> [{binary(), binary()}].
+-callback remove_user(binary(), binary()) -> {atomic, any()}.
+-callback is_search_supported(binary()) -> boolean().
+-callback use_cache(binary()) -> boolean().
+-callback cache_nodes(binary()) -> [node()].
 
--record(vcard_search,
-	{us, user, luser, fn, lfn, family, lfamily, given,
-	 lgiven, middle, lmiddle, nickname, lnickname, bday,
-	 lbday, ctry, lctry, locality, llocality, email, lemail,
-	 orgname, lorgname, orgunit, lorgunit}).
+-optional_callbacks([use_cache/1, cache_nodes/1]).
 
--record(vcard, {us = {<<"">>, <<"">>} :: {binary(), binary()} | binary(),
-                vcard = #xmlel{} :: xmlel()}).
+-record(state, {hosts :: [binary()], server_host :: binary()}).
 
--define(PROCNAME, ejabberd_mod_vcard).
-
+%%====================================================================
+%% gen_mod callbacks
+%%====================================================================
 start(Host, Opts) ->
-    case gen_mod:db_type(Host, Opts) of
-      mnesia ->
-	  mnesia:create_table(vcard,
-			      [{disc_only_copies, [node()]},
-			       {attributes, record_info(fields, vcard)}]),
-	  mnesia:create_table(vcard_search,
-			      [{disc_copies, [node()]},
-			       {attributes,
-				record_info(fields, vcard_search)}]),
-	  update_tables(),
-	  mnesia:add_table_index(vcard_search, luser),
-	  mnesia:add_table_index(vcard_search, lfn),
-	  mnesia:add_table_index(vcard_search, lfamily),
-	  mnesia:add_table_index(vcard_search, lgiven),
-	  mnesia:add_table_index(vcard_search, lmiddle),
-	  mnesia:add_table_index(vcard_search, lnickname),
-	  mnesia:add_table_index(vcard_search, lbday),
-	  mnesia:add_table_index(vcard_search, lctry),
-	  mnesia:add_table_index(vcard_search, llocality),
-	  mnesia:add_table_index(vcard_search, lemail),
-	  mnesia:add_table_index(vcard_search, lorgname),
-	  mnesia:add_table_index(vcard_search, lorgunit);
-      _ -> ok
-    end,
-    ejabberd_hooks:add(remove_user, Host, ?MODULE,
-		       remove_user, 50),
-    IQDisc = gen_mod:get_opt(iqdisc, Opts, fun gen_iq_handler:check_type/1,
-                             one_queue),
-    gen_iq_handler:add_iq_handler(ejabberd_local, Host,
-				  ?NS_VCARD, ?MODULE, process_local_iq, IQDisc),
-    gen_iq_handler:add_iq_handler(ejabberd_sm, Host,
-				  ?NS_VCARD, ?MODULE, process_sm_iq, IQDisc),
-    ejabberd_hooks:add(disco_sm_features, Host, ?MODULE,
-		       get_sm_features, 50),
-    MyHost = gen_mod:get_opt_host(Host, Opts,
-				  <<"vjud.@HOST@">>),
-    Search = gen_mod:get_opt(search, Opts,
-                             fun(B) when is_boolean(B) -> B end,
-                             true),
-    register(gen_mod:get_module_proc(Host, ?PROCNAME),
-	     spawn(?MODULE, init, [MyHost, Host, Search])).
-
-init(Host, ServerHost, Search) ->
-    case Search of
-      false -> loop(Host, ServerHost);
-      _ ->
-	  ejabberd_router:register_route(Host),
-	  loop(Host, ServerHost)
-    end.
-
-loop(Host, ServerHost) ->
-    receive
-      {route, From, To, Packet} ->
-	  case catch do_route(ServerHost, From, To, Packet) of
-	    {'EXIT', Reason} -> ?ERROR_MSG("~p", [Reason]);
-	    _ -> ok
-	  end,
-	  loop(Host, ServerHost);
-      stop -> ejabberd_router:unregister_route(Host), ok;
-      _ -> loop(Host, ServerHost)
-    end.
+    gen_mod:start_child(?MODULE, Host, Opts).
 
 stop(Host) ->
-    ejabberd_hooks:delete(remove_user, Host, ?MODULE,
-			  remove_user, 50),
-    gen_iq_handler:remove_iq_handler(ejabberd_local, Host,
-				     ?NS_VCARD),
-    gen_iq_handler:remove_iq_handler(ejabberd_sm, Host,
-				     ?NS_VCARD),
-    ejabberd_hooks:delete(disco_sm_features, Host, ?MODULE,
-			  get_sm_features, 50),
-    Proc = gen_mod:get_module_proc(Host, ?PROCNAME),
-    Proc ! stop,
-    {wait, Proc}.
+    gen_mod:stop_child(?MODULE, Host).
 
+%%====================================================================
+%% gen_server callbacks
+%%====================================================================
+init([Host|_]) ->
+    process_flag(trap_exit, true),
+    Opts = gen_mod:get_module_opts(Host, ?MODULE),
+    Mod = gen_mod:db_mod(Opts, ?MODULE),
+    Mod:init(Host, Opts),
+    init_cache(Mod, Host, Opts),
+    ejabberd_hooks:add(remove_user, Host, ?MODULE,
+		       remove_user, 50),
+    gen_iq_handler:add_iq_handler(ejabberd_local, Host,
+				  ?NS_VCARD, ?MODULE, process_local_iq),
+    gen_iq_handler:add_iq_handler(ejabberd_sm, Host,
+				  ?NS_VCARD, ?MODULE, process_sm_iq),
+    ejabberd_hooks:add(disco_sm_features, Host, ?MODULE,
+		       get_sm_features, 50),
+    ejabberd_hooks:add(vcard_iq_set, Host, ?MODULE, vcard_iq_set, 50),
+    MyHosts = gen_mod:get_opt_hosts(Opts),
+    Search = mod_vcard_opt:search(Opts),
+    if Search ->
+	    lists:foreach(
+	      fun(MyHost) ->
+		      ejabberd_hooks:add(
+			disco_local_items, MyHost, ?MODULE, disco_items, 100),
+		      ejabberd_hooks:add(
+			disco_local_features, MyHost, ?MODULE, disco_features, 100),
+		      ejabberd_hooks:add(
+			disco_local_identity, MyHost, ?MODULE, disco_identity, 100),
+		      gen_iq_handler:add_iq_handler(
+			ejabberd_local, MyHost, ?NS_SEARCH, ?MODULE, process_search),
+		      gen_iq_handler:add_iq_handler(
+			ejabberd_local, MyHost, ?NS_VCARD, ?MODULE, process_vcard),
+		      gen_iq_handler:add_iq_handler(
+			ejabberd_local, MyHost, ?NS_DISCO_ITEMS, mod_disco,
+			process_local_iq_items),
+		      gen_iq_handler:add_iq_handler(
+			ejabberd_local, MyHost, ?NS_DISCO_INFO, mod_disco,
+			process_local_iq_info),
+		      case Mod:is_search_supported(Host) of
+			  false ->
+			      ?WARNING_MSG("vCard search functionality is "
+					   "not implemented for ~ts backend",
+					   [mod_vcard_opt:db_type(Opts)]);
+			  true ->
+			      ejabberd_router:register_route(
+				MyHost, Host, {apply, ?MODULE, route})
+		      end
+	      end, MyHosts);
+       true ->
+	    ok
+    end,
+    {ok, #state{hosts = MyHosts, server_host = Host}}.
+
+handle_call(Call, From, State) ->
+    ?WARNING_MSG("Unexpected call from ~p: ~p", [From, Call]),
+    {noreply, State}.
+
+handle_cast(Cast, State) ->
+    ?WARNING_MSG("Unexpected cast: ~p", [Cast]),
+    {noreply, State}.
+
+handle_info({route, Packet}, State) ->
+    try route(Packet)
+    catch ?EX_RULE(Class, Reason, St) ->
+	    StackTrace = ?EX_STACK(St),
+	    ?ERROR_MSG("Failed to route packet:~n~ts~n** ~ts",
+		       [xmpp:pp(Packet),
+			misc:format_exception(2, Class, Reason, StackTrace)])
+    end,
+    {noreply, State};
+handle_info(Info, State) ->
+    ?WARNING_MSG("Unexpected info: ~p", [Info]),
+    {noreply, State}.
+
+terminate(_Reason, #state{hosts = MyHosts, server_host = Host}) ->
+    ejabberd_hooks:delete(remove_user, Host, ?MODULE, remove_user, 50),
+    gen_iq_handler:remove_iq_handler(ejabberd_local, Host, ?NS_VCARD),
+    gen_iq_handler:remove_iq_handler(ejabberd_sm, Host, ?NS_VCARD),
+    ejabberd_hooks:delete(disco_sm_features, Host, ?MODULE, get_sm_features, 50),
+    ejabberd_hooks:delete(vcard_iq_set, Host, ?MODULE, vcard_iq_set, 50),
+    Mod = gen_mod:db_mod(Host, ?MODULE),
+    Mod:stop(Host),
+    lists:foreach(
+      fun(MyHost) ->
+	      ejabberd_router:unregister_route(MyHost),
+	      ejabberd_hooks:delete(disco_local_items, MyHost, ?MODULE, disco_items, 100),
+	      ejabberd_hooks:delete(disco_local_features, MyHost, ?MODULE, disco_features, 100),
+	      ejabberd_hooks:delete(disco_local_identity, MyHost, ?MODULE, disco_identity, 100),
+	      gen_iq_handler:remove_iq_handler(ejabberd_local, MyHost, ?NS_SEARCH),
+	      gen_iq_handler:remove_iq_handler(ejabberd_local, MyHost, ?NS_VCARD),
+	      gen_iq_handler:remove_iq_handler(ejabberd_local, MyHost, ?NS_DISCO_ITEMS),
+	      gen_iq_handler:remove_iq_handler(ejabberd_local, MyHost, ?NS_DISCO_INFO)
+      end, MyHosts).
+
+code_change(_OldVsn, State, _Extra) ->
+    {ok, State}.
+
+-spec route(stanza()) -> ok.
+route(#iq{} = IQ) ->
+    ejabberd_router:process_iq(IQ);
+route(_) ->
+    ok.
+
+-spec get_sm_features({error, stanza_error()} | empty | {result, [binary()]},
+		      jid(), jid(), binary(), binary()) ->
+			     {error, stanza_error()} | empty | {result, [binary()]}.
 get_sm_features({error, _Error} = Acc, _From, _To,
 		_Node, _Lang) ->
     Acc;
@@ -135,129 +194,164 @@ get_sm_features(Acc, _From, _To, Node, _Lang) ->
       <<"">> ->
 	  case Acc of
 	    {result, Features} ->
-		{result, [?NS_DISCO_INFO, ?NS_VCARD | Features]};
-	    empty -> {result, [?NS_DISCO_INFO, ?NS_VCARD]}
+		{result, [?NS_VCARD | Features]};
+	    empty -> {result, [?NS_VCARD]}
 	  end;
       _ -> Acc
     end.
 
-process_local_iq(_From, _To,
-		 #iq{type = Type, lang = Lang, sub_el = SubEl} = IQ) ->
-    case Type of
-      set ->
-	  IQ#iq{type = error, sub_el = [SubEl, ?ERR_NOT_ALLOWED]};
-      get ->
-	  IQ#iq{type = result,
-		sub_el =
-		    [#xmlel{name = <<"vCard">>,
-			    attrs = [{<<"xmlns">>, ?NS_VCARD}],
-			    children =
-				[#xmlel{name = <<"FN">>, attrs = [],
-					children =
-					    [{xmlcdata, <<"ejabberd">>}]},
-				 #xmlel{name = <<"URL">>, attrs = [],
-					children = [{xmlcdata, ?EJABBERD_URI}]},
-				 #xmlel{name = <<"DESC">>, attrs = [],
-					children =
-					    [{xmlcdata,
-					      <<(translate:translate(Lang,
-								     <<"Erlang Jabber Server">>))/binary,
-						"\nCopyright (c) 2002-2015 ProcessOne">>}]},
-				 #xmlel{name = <<"BDAY">>, attrs = [],
-					children =
-					    [{xmlcdata, <<"2002-11-16">>}]}]}]}
+-spec process_local_iq(iq()) -> iq().
+process_local_iq(#iq{type = set, lang = Lang} = IQ) ->
+    Txt = ?T("Value 'set' of 'type' attribute is not allowed"),
+    xmpp:make_error(IQ, xmpp:err_not_allowed(Txt, Lang));
+process_local_iq(#iq{type = get, to = To, lang = Lang} = IQ) ->
+    ServerHost = ejabberd_router:host_of_route(To#jid.lserver),
+    VCard = case mod_vcard_opt:vcard(ServerHost) of
+		undefined ->
+		    #vcard_temp{fn = <<"ejabberd">>,
+				url = ejabberd_config:get_uri(),
+				desc = misc:get_descr(Lang, ?T("Erlang XMPP Server")),
+				bday = <<"2002-11-16">>};
+		V ->
+		    V
+	    end,
+    xmpp:make_iq_result(IQ, VCard).
+
+-spec process_sm_iq(iq()) -> iq().
+process_sm_iq(#iq{type = set, lang = Lang, from = From} = IQ) ->
+    #jid{lserver = LServer} = From,
+    case lists:member(LServer, ejabberd_option:hosts()) of
+	true ->
+	    case ejabberd_hooks:run_fold(vcard_iq_set, LServer, IQ, []) of
+		drop -> ignore;
+		#stanza_error{} = Err -> xmpp:make_error(IQ, Err);
+		_ -> xmpp:make_iq_result(IQ)
+	    end;
+	false ->
+	    Txt = ?T("The query is only allowed from local users"),
+	    xmpp:make_error(IQ, xmpp:err_not_allowed(Txt, Lang))
+    end;
+process_sm_iq(#iq{type = get, from = From, to = To, lang = Lang} = IQ) ->
+    #jid{luser = LUser, lserver = LServer} = To,
+    case get_vcard(LUser, LServer) of
+	error ->
+	    Txt = ?T("Database failure"),
+	    xmpp:make_error(IQ, xmpp:err_internal_server_error(Txt, Lang));
+	[] ->
+	    xmpp:make_iq_result(IQ, #vcard_temp{});
+	Els ->
+	    IQ#iq{type = result, to = From, from = To, sub_els = Els}
     end.
 
-process_sm_iq(From, To,
-	      #iq{type = Type, sub_el = SubEl} = IQ) ->
-    case Type of
-      set ->
-	  #jid{user = User, lserver = LServer} = From,
-	  case lists:member(LServer, ?MYHOSTS) of
-	    true ->
-		set_vcard(User, LServer, SubEl),
-		IQ#iq{type = result, sub_el = []};
-	    false ->
-		IQ#iq{type = error, sub_el = [SubEl, ?ERR_NOT_ALLOWED]}
-	  end;
-      get ->
-	  #jid{luser = LUser, lserver = LServer} = To,
-	  case get_vcard(LUser, LServer) of
-	    error ->
-		IQ#iq{type = error,
-		      sub_el = [SubEl, ?ERR_INTERNAL_SERVER_ERROR]};
-	    [] ->
-		IQ#iq{type = result,
-		      sub_el = [#xmlel{name = <<"vCard">>,
-			        attrs = [{<<"xmlns">>, ?NS_VCARD}],
-			        children = []}]};
-	    Els -> IQ#iq{type = result, sub_el = Els}
-	  end
-    end.
+-spec process_vcard(iq()) -> iq().
+process_vcard(#iq{type = set, lang = Lang} = IQ) ->
+    Txt = ?T("Value 'set' of 'type' attribute is not allowed"),
+    xmpp:make_error(IQ, xmpp:err_not_allowed(Txt, Lang));
+process_vcard(#iq{type = get, lang = Lang} = IQ) ->
+    xmpp:make_iq_result(
+      IQ, #vcard_temp{fn = <<"ejabberd/mod_vcard">>,
+		      url = ejabberd_config:get_uri(),
+		      desc = misc:get_descr(Lang, ?T("ejabberd vCard module"))}).
 
+-spec process_search(iq()) -> iq().
+process_search(#iq{type = get, to = To, lang = Lang} = IQ) ->
+    ServerHost = ejabberd_router:host_of_route(To#jid.lserver),
+    xmpp:make_iq_result(IQ, mk_search_form(To, ServerHost, Lang));
+process_search(#iq{type = set, to = To, lang = Lang,
+		   sub_els = [#search{xdata = #xdata{type = submit,
+						     fields = Fs}}]} = IQ) ->
+    ServerHost = ejabberd_router:host_of_route(To#jid.lserver),
+    ResultXData = search_result(Lang, To, ServerHost, Fs),
+    xmpp:make_iq_result(IQ, #search{xdata = ResultXData});
+process_search(#iq{type = set, lang = Lang} = IQ) ->
+    Txt = ?T("Incorrect data form"),
+    xmpp:make_error(IQ, xmpp:err_bad_request(Txt, Lang)).
+
+-spec disco_items({error, stanza_error()} | {result, [disco_item()]} | empty,
+		  jid(), jid(), binary(), binary()) ->
+			 {error, stanza_error()} | {result, [disco_item()]}.
+disco_items(empty, _From, _To, <<"">>, _Lang) ->
+    {result, []};
+disco_items(empty, _From, _To, _Node, Lang) ->
+    {error, xmpp:err_item_not_found(?T("No services available"), Lang)};
+disco_items(Acc, _From, _To, _Node, _Lang) ->
+    Acc.
+
+-spec disco_features({error, stanza_error()} | {result, [binary()]} | empty,
+		     jid(), jid(), binary(), binary()) ->
+			    {error, stanza_error()} | {result, [binary()]}.
+disco_features({error, _Error} = Acc, _From, _To, _Node, _Lang) ->
+    Acc;
+disco_features(Acc, _From, _To, <<"">>, _Lang) ->
+    Features = case Acc of
+		   {result, Fs} -> Fs;
+		   empty -> []
+	       end,
+    {result, [?NS_DISCO_INFO, ?NS_DISCO_ITEMS,
+	      ?NS_VCARD, ?NS_SEARCH | Features]};
+disco_features(empty, _From, _To, _Node, Lang) ->
+    Txt = ?T("No features available"),
+    {error, xmpp:err_item_not_found(Txt, Lang)};
+disco_features(Acc, _From, _To, _Node, _Lang) ->
+    Acc.
+
+-spec disco_identity([identity()], jid(), jid(),
+		     binary(),  binary()) -> [identity()].
+disco_identity(Acc, _From, To, <<"">>, Lang) ->
+    Host = ejabberd_router:host_of_route(To#jid.lserver),
+    Name = mod_vcard_opt:name(Host),
+    [#identity{category = <<"directory">>,
+	       type = <<"user">>,
+	       name = translate:translate(Lang, Name)}|Acc];
+disco_identity(Acc, _From, _To, _Node, _Lang) ->
+    Acc.
+
+-spec get_vcard(binary(), binary()) -> [xmlel()] | error.
 get_vcard(LUser, LServer) ->
-    get_vcard(LUser, LServer,
-	      gen_mod:db_type(LServer, ?MODULE)).
-
-get_vcard(LUser, LServer, mnesia) ->
-    US = {LUser, LServer},
-    F = fun () -> mnesia:read({vcard, US}) end,
-    case mnesia:transaction(F) of
-      {atomic, Rs} ->
-	  lists:map(fun (R) -> R#vcard.vcard end, Rs);
-      {aborted, _Reason} -> error
-    end;
-get_vcard(LUser, LServer, odbc) ->
-    Username = ejabberd_odbc:escape(LUser),
-    case catch odbc_queries:get_vcard(LServer, Username) of
-      {selected, [<<"vcard">>], [[SVCARD]]} ->
-	  case xml_stream:parse_element(SVCARD) of
-	    {error, _Reason} -> error;
-	    VCARD -> [VCARD]
-	  end;
-      {selected, [<<"vcard">>], []} -> [];
-      _ -> error
-    end;
-get_vcard(LUser, LServer, riak) ->
-    case ejabberd_riak:get(vcard, vcard_schema(), {LUser, LServer}) of
-        {ok, R} ->
-            [R#vcard.vcard];
-        {error, notfound} ->
-            [];
-        _ ->
-            error
+    Mod = gen_mod:db_mod(LServer, ?MODULE),
+    Result = case use_cache(Mod, LServer) of
+		 true ->
+		     ets_cache:lookup(
+		       ?VCARD_CACHE, {LUser, LServer},
+		       fun() -> Mod:get_vcard(LUser, LServer) end);
+		 false ->
+		     Mod:get_vcard(LUser, LServer)
+	     end,
+    case Result of
+	{ok, Els} -> Els;
+	error -> error
     end.
 
-set_vcard(User, LServer, VCARD) ->
-    FN = xml:get_path_s(VCARD, [{elem, <<"FN">>}, cdata]),
-    Family = xml:get_path_s(VCARD,
+-spec make_vcard_search(binary(), binary(), binary(), xmlel()) -> #vcard_search{}.
+make_vcard_search(User, LUser, LServer, VCARD) ->
+    FN = fxml:get_path_s(VCARD, [{elem, <<"FN">>}, cdata]),
+    Family = fxml:get_path_s(VCARD,
 			    [{elem, <<"N">>}, {elem, <<"FAMILY">>}, cdata]),
-    Given = xml:get_path_s(VCARD,
+    Given = fxml:get_path_s(VCARD,
 			   [{elem, <<"N">>}, {elem, <<"GIVEN">>}, cdata]),
-    Middle = xml:get_path_s(VCARD,
+    Middle = fxml:get_path_s(VCARD,
 			    [{elem, <<"N">>}, {elem, <<"MIDDLE">>}, cdata]),
-    Nickname = xml:get_path_s(VCARD,
+    Nickname = fxml:get_path_s(VCARD,
 			      [{elem, <<"NICKNAME">>}, cdata]),
-    BDay = xml:get_path_s(VCARD,
+    BDay = fxml:get_path_s(VCARD,
 			  [{elem, <<"BDAY">>}, cdata]),
-    CTRY = xml:get_path_s(VCARD,
+    CTRY = fxml:get_path_s(VCARD,
 			  [{elem, <<"ADR">>}, {elem, <<"CTRY">>}, cdata]),
-    Locality = xml:get_path_s(VCARD,
+    Locality = fxml:get_path_s(VCARD,
 			      [{elem, <<"ADR">>}, {elem, <<"LOCALITY">>},
 			       cdata]),
-    EMail1 = xml:get_path_s(VCARD,
+    EMail1 = fxml:get_path_s(VCARD,
 			    [{elem, <<"EMAIL">>}, {elem, <<"USERID">>}, cdata]),
-    EMail2 = xml:get_path_s(VCARD,
+    EMail2 = fxml:get_path_s(VCARD,
 			    [{elem, <<"EMAIL">>}, cdata]),
-    OrgName = xml:get_path_s(VCARD,
+    OrgName = fxml:get_path_s(VCARD,
 			     [{elem, <<"ORG">>}, {elem, <<"ORGNAME">>}, cdata]),
-    OrgUnit = xml:get_path_s(VCARD,
+    OrgUnit = fxml:get_path_s(VCARD,
 			     [{elem, <<"ORG">>}, {elem, <<"ORGUNIT">>}, cdata]),
     EMail = case EMail1 of
 	      <<"">> -> EMail2;
 	      _ -> EMail1
 	    end,
-    LUser = jlib:nodeprep(User),
     LFN = string2lower(FN),
     LFamily = string2lower(Family),
     LGiven = string2lower(Given),
@@ -269,893 +363,321 @@ set_vcard(User, LServer, VCARD) ->
     LEMail = string2lower(EMail),
     LOrgName = string2lower(OrgName),
     LOrgUnit = string2lower(OrgUnit),
-    if (LUser == error) ->
-	   {error, badarg};
-       true ->
-	   case gen_mod:db_type(LServer, ?MODULE) of
-	     mnesia ->
-		 US = {LUser, LServer},
-		 F = fun () ->
-			     mnesia:write(#vcard{us = US, vcard = VCARD}),
-			     mnesia:write(#vcard_search{us = US,
-							user = {User, LServer},
-							luser = LUser, fn = FN,
-							lfn = LFN,
-							family = Family,
-							lfamily = LFamily,
-							given = Given,
-							lgiven = LGiven,
-							middle = Middle,
-							lmiddle = LMiddle,
-							nickname = Nickname,
-							lnickname = LNickname,
-							bday = BDay,
-							lbday = LBDay,
-							ctry = CTRY,
-							lctry = LCTRY,
-							locality = Locality,
-							llocality = LLocality,
-							email = EMail,
-							lemail = LEMail,
-							orgname = OrgName,
-							lorgname = LOrgName,
-							orgunit = OrgUnit,
-							lorgunit = LOrgUnit})
-		     end,
-		 mnesia:transaction(F);
-             riak ->
-                 US = {LUser, LServer},
-                 ejabberd_riak:put(#vcard{us = US, vcard = VCARD},
-				   vcard_schema(),
-                                   [{'2i', [{<<"user">>, User},
-                                            {<<"luser">>, LUser},
-                                            {<<"fn">>, FN},
-                                            {<<"lfn">>, LFN},
-                                            {<<"family">>, Family},
-                                            {<<"lfamily">>, LFamily},
-                                            {<<"given">>, Given},
-                                            {<<"lgiven">>, LGiven},
-                                            {<<"middle">>, Middle},
-                                            {<<"lmiddle">>, LMiddle},
-                                            {<<"nickname">>, Nickname},
-                                            {<<"lnickname">>, LNickname},
-                                            {<<"bday">>, BDay},
-                                            {<<"lbday">>, LBDay},
-                                            {<<"ctry">>, CTRY},
-                                            {<<"lctry">>, LCTRY},
-                                            {<<"locality">>, Locality},
-                                            {<<"llocality">>, LLocality},
-                                            {<<"email">>, EMail},
-                                            {<<"lemail">>, LEMail},
-                                            {<<"orgname">>, OrgName},
-                                            {<<"lorgname">>, LOrgName},
-                                            {<<"orgunit">>, OrgUnit},
-                                            {<<"lorgunit">>, LOrgUnit}]}]);
-	     odbc ->
-		 Username = ejabberd_odbc:escape(User),
-		 LUsername = ejabberd_odbc:escape(LUser),
-		 SVCARD =
-		     ejabberd_odbc:escape(xml:element_to_binary(VCARD)),
-		 SFN = ejabberd_odbc:escape(FN),
-		 SLFN = ejabberd_odbc:escape(LFN),
-		 SFamily = ejabberd_odbc:escape(Family),
-		 SLFamily = ejabberd_odbc:escape(LFamily),
-		 SGiven = ejabberd_odbc:escape(Given),
-		 SLGiven = ejabberd_odbc:escape(LGiven),
-		 SMiddle = ejabberd_odbc:escape(Middle),
-		 SLMiddle = ejabberd_odbc:escape(LMiddle),
-		 SNickname = ejabberd_odbc:escape(Nickname),
-		 SLNickname = ejabberd_odbc:escape(LNickname),
-		 SBDay = ejabberd_odbc:escape(BDay),
-		 SLBDay = ejabberd_odbc:escape(LBDay),
-		 SCTRY = ejabberd_odbc:escape(CTRY),
-		 SLCTRY = ejabberd_odbc:escape(LCTRY),
-		 SLocality = ejabberd_odbc:escape(Locality),
-		 SLLocality = ejabberd_odbc:escape(LLocality),
-		 SEMail = ejabberd_odbc:escape(EMail),
-		 SLEMail = ejabberd_odbc:escape(LEMail),
-		 SOrgName = ejabberd_odbc:escape(OrgName),
-		 SLOrgName = ejabberd_odbc:escape(LOrgName),
-		 SOrgUnit = ejabberd_odbc:escape(OrgUnit),
-		 SLOrgUnit = ejabberd_odbc:escape(LOrgUnit),
-		 odbc_queries:set_vcard(LServer, LUsername, SBDay, SCTRY,
-					SEMail, SFN, SFamily, SGiven, SLBDay,
-					SLCTRY, SLEMail, SLFN, SLFamily,
-					SLGiven, SLLocality, SLMiddle,
-					SLNickname, SLOrgName, SLOrgUnit,
-					SLocality, SMiddle, SNickname, SOrgName,
-					SOrgUnit, SVCARD, Username)
-	   end,
-	   ejabberd_hooks:run(vcard_set, LServer,
-			      [LUser, LServer, VCARD])
+    US = {LUser, LServer},
+    #vcard_search{us = US,
+		  user = {User, LServer},
+		  luser = LUser, fn = FN,
+		  lfn = LFN,
+		  family = Family,
+		  lfamily = LFamily,
+		  given = Given,
+		  lgiven = LGiven,
+		  middle = Middle,
+		  lmiddle = LMiddle,
+		  nickname = Nickname,
+		  lnickname = LNickname,
+		  bday = BDay,
+		  lbday = LBDay,
+		  ctry = CTRY,
+		  lctry = LCTRY,
+		  locality = Locality,
+		  llocality = LLocality,
+		  email = EMail,
+		  lemail = LEMail,
+		  orgname = OrgName,
+		  lorgname = LOrgName,
+		  orgunit = OrgUnit,
+		  lorgunit = LOrgUnit}.
+
+-spec vcard_iq_set(iq()) -> iq() | {stop, stanza_error()}.
+vcard_iq_set(#iq{from = From, lang = Lang, sub_els = [VCard]} = IQ) ->
+    #jid{user = User, lserver = LServer} = From,
+    case set_vcard(User, LServer, VCard) of
+	{error, badarg} ->
+	    %% Should not be here?
+	    Txt = ?T("Nodeprep has failed"),
+	    {stop, xmpp:err_internal_server_error(Txt, Lang)};
+	ok ->
+	    IQ
+    end;
+vcard_iq_set(Acc) ->
+    Acc.
+
+-spec set_vcard(binary(), binary(), xmlel() | vcard_temp()) -> {error, badarg|binary()} | ok.
+set_vcard(User, LServer, VCARD) ->
+    case jid:nodeprep(User) of
+	error ->
+	    {error, badarg};
+	LUser ->
+	    VCardEl = xmpp:encode(VCARD),
+	    VCardSearch = make_vcard_search(User, LUser, LServer, VCardEl),
+	    Mod = gen_mod:db_mod(LServer, ?MODULE),
+            case Mod:set_vcard(LUser, LServer, VCardEl, VCardSearch) of
+                {atomic, ok} ->
+	            ets_cache:delete(?VCARD_CACHE, {LUser, LServer},
+			     cache_nodes(Mod, LServer)),
+                    ok;
+                {atomic, Error} ->
+                    {error, Error}
+            end
     end.
 
+-spec string2lower(binary()) -> binary().
 string2lower(String) ->
-    case stringprep:tolower(String) of
+    case stringprep:tolower_nofilter(String) of
       Lower when is_binary(Lower) -> Lower;
-      error -> str:to_lower(String)
+      error -> String
     end.
 
--define(TLFIELD(Type, Label, Var),
-	#xmlel{name = <<"field">>,
-	       attrs =
-		   [{<<"type">>, Type},
-		    {<<"label">>, translate:translate(Lang, Label)},
-		    {<<"var">>, Var}],
-	       children = []}).
+-spec mk_tfield(binary(), binary(), binary()) -> xdata_field().
+mk_tfield(Label, Var, Lang) ->
+    #xdata_field{type = 'text-single',
+		 label = translate:translate(Lang, Label),
+		 var = Var}.
 
--define(FORM(JID),
-	[#xmlel{name = <<"instructions">>, attrs = [],
-		children =
-		    [{xmlcdata,
-		      translate:translate(Lang,
-					  <<"You need an x:data capable client to "
-					    "search">>)}]},
-	 #xmlel{name = <<"x">>,
-		attrs =
-		    [{<<"xmlns">>, ?NS_XDATA}, {<<"type">>, <<"form">>}],
-		children =
-		    [#xmlel{name = <<"title">>, attrs = [],
-			    children =
-				[{xmlcdata,
-				  <<(translate:translate(Lang,
-							 <<"Search users in ">>))/binary,
-				    (jlib:jid_to_string(JID))/binary>>}]},
-		     #xmlel{name = <<"instructions">>, attrs = [],
-			    children =
-				[{xmlcdata,
-				  translate:translate(Lang,
-						      <<"Fill in the form to search for any matching "
-							"Jabber User (Add * to the end of field "
-							"to match substring)">>)}]},
-		     ?TLFIELD(<<"text-single">>, <<"User">>, <<"user">>),
-		     ?TLFIELD(<<"text-single">>, <<"Full Name">>, <<"fn">>),
-		     ?TLFIELD(<<"text-single">>, <<"Name">>, <<"first">>),
-		     ?TLFIELD(<<"text-single">>, <<"Middle Name">>,
-			      <<"middle">>),
-		     ?TLFIELD(<<"text-single">>, <<"Family Name">>,
-			      <<"last">>),
-		     ?TLFIELD(<<"text-single">>, <<"Nickname">>, <<"nick">>),
-		     ?TLFIELD(<<"text-single">>, <<"Birthday">>, <<"bday">>),
-		     ?TLFIELD(<<"text-single">>, <<"Country">>, <<"ctry">>),
-		     ?TLFIELD(<<"text-single">>, <<"City">>, <<"locality">>),
-		     ?TLFIELD(<<"text-single">>, <<"Email">>, <<"email">>),
-		     ?TLFIELD(<<"text-single">>, <<"Organization Name">>,
-			      <<"orgname">>),
-		     ?TLFIELD(<<"text-single">>, <<"Organization Unit">>,
-			      <<"orgunit">>)]}]).
+-spec mk_field(binary(), binary()) -> xdata_field().
+mk_field(Var, Val) ->
+    #xdata_field{var = Var, values = [Val]}.
 
-do_route(ServerHost, From, To, Packet) ->
-    #jid{user = User, resource = Resource} = To,
-    if (User /= <<"">>) or (Resource /= <<"">>) ->
-	   Err = jlib:make_error_reply(Packet,
-				       ?ERR_SERVICE_UNAVAILABLE),
-	   ejabberd_router:route(To, From, Err);
-       true ->
-	   IQ = jlib:iq_query_info(Packet),
-	   case IQ of
-	     #iq{type = Type, xmlns = ?NS_SEARCH, lang = Lang,
-		 sub_el = SubEl} ->
-		 case Type of
-		   set ->
-		       XDataEl = find_xdata_el(SubEl),
-		       case XDataEl of
-			 false ->
-			     Err = jlib:make_error_reply(Packet,
-							 ?ERR_BAD_REQUEST),
-			     ejabberd_router:route(To, From, Err);
-			 _ ->
-			     XData = jlib:parse_xdata_submit(XDataEl),
-			     case XData of
-			       invalid ->
-				   Err = jlib:make_error_reply(Packet,
-							       ?ERR_BAD_REQUEST),
-				   ejabberd_router:route(To, From, Err);
-			       _ ->
-				   ResIQ = IQ#iq{type = result,
-						 sub_el =
-						     [#xmlel{name = <<"query">>,
-							     attrs =
-								 [{<<"xmlns">>,
-								   ?NS_SEARCH}],
-							     children =
-								 [#xmlel{name =
-									     <<"x">>,
-									 attrs =
-									     [{<<"xmlns">>,
-									       ?NS_XDATA},
-									      {<<"type">>,
-									       <<"result">>}],
-									 children
-									     =
-									     search_result(Lang,
-											   To,
-											   ServerHost,
-											   XData)}]}]},
-				   ejabberd_router:route(To, From,
-							 jlib:iq_to_xml(ResIQ))
-			     end
-		       end;
-		   get ->
-		       ResIQ = IQ#iq{type = result,
-				     sub_el =
-					 [#xmlel{name = <<"query">>,
-						 attrs =
-						     [{<<"xmlns">>,
-						       ?NS_SEARCH}],
-						 children = ?FORM(To)}]},
-		       ejabberd_router:route(To, From, jlib:iq_to_xml(ResIQ))
-		 end;
-	     #iq{type = Type, xmlns = ?NS_DISCO_INFO, lang = Lang} ->
-		 case Type of
-		   set ->
-		       Err = jlib:make_error_reply(Packet, ?ERR_NOT_ALLOWED),
-		       ejabberd_router:route(To, From, Err);
-		   get ->
-		       Info = ejabberd_hooks:run_fold(disco_info, ServerHost,
-						      [],
-						      [ServerHost, ?MODULE,
-						       <<"">>, <<"">>]),
-		       ResIQ = IQ#iq{type = result,
-				     sub_el =
-					 [#xmlel{name = <<"query">>,
-						 attrs =
-						     [{<<"xmlns">>,
-						       ?NS_DISCO_INFO}],
-						 children =
-						     [#xmlel{name =
-								 <<"identity">>,
-							     attrs =
-								 [{<<"category">>,
-								   <<"directory">>},
-								  {<<"type">>,
-								   <<"user">>},
-								  {<<"name">>,
-								   translate:translate(Lang,
-										       <<"vCard User Search">>)}],
-							     children = []},
-						      #xmlel{name =
-								 <<"feature">>,
-							     attrs =
-								 [{<<"var">>,
-								   ?NS_DISCO_INFO}],
-							     children = []},
-						      #xmlel{name =
-								 <<"feature">>,
-							     attrs =
-								 [{<<"var">>,
-								   ?NS_SEARCH}],
-							     children = []},
-						      #xmlel{name =
-								 <<"feature">>,
-							     attrs =
-								 [{<<"var">>,
-								   ?NS_VCARD}],
-							     children = []}]
-						       ++ Info}]},
-		       ejabberd_router:route(To, From, jlib:iq_to_xml(ResIQ))
-		 end;
-	     #iq{type = Type, xmlns = ?NS_DISCO_ITEMS} ->
-		 case Type of
-		   set ->
-		       Err = jlib:make_error_reply(Packet, ?ERR_NOT_ALLOWED),
-		       ejabberd_router:route(To, From, Err);
-		   get ->
-		       ResIQ = IQ#iq{type = result,
-				     sub_el =
-					 [#xmlel{name = <<"query">>,
-						 attrs =
-						     [{<<"xmlns">>,
-						       ?NS_DISCO_ITEMS}],
-						 children = []}]},
-		       ejabberd_router:route(To, From, jlib:iq_to_xml(ResIQ))
-		 end;
-	     #iq{type = get, xmlns = ?NS_VCARD, lang = Lang} ->
-		 ResIQ = IQ#iq{type = result,
-			       sub_el =
-				   [#xmlel{name = <<"vCard">>,
-					   attrs = [{<<"xmlns">>, ?NS_VCARD}],
-					   children = iq_get_vcard(Lang)}]},
-		 ejabberd_router:route(To, From, jlib:iq_to_xml(ResIQ));
-	     _ ->
-		 Err = jlib:make_error_reply(Packet,
-					     ?ERR_SERVICE_UNAVAILABLE),
-		 ejabberd_router:route(To, From, Err)
-	   end
+-spec mk_search_form(jid(), binary(), binary()) -> search().
+mk_search_form(JID, ServerHost, Lang) ->
+    Title = <<(translate:translate(Lang, ?T("Search users in ")))/binary,
+	      (jid:encode(JID))/binary>>,
+    Mod = gen_mod:db_mod(ServerHost, ?MODULE),
+    SearchFields = Mod:search_fields(ServerHost),
+    Fs = [mk_tfield(Label, Var, Lang) || {Label, Var} <- SearchFields],
+    X = #xdata{type = form,
+	       title = Title,
+	       instructions = [make_instructions(Mod, Lang)],
+	       fields = Fs},
+    #search{instructions =
+		translate:translate(
+		  Lang, ?T("You need an x:data capable client to search")),
+	    xdata = X}.
+
+-spec make_instructions(module(), binary()) -> binary().
+make_instructions(Mod, Lang) ->
+    Fill = translate:translate(
+	     Lang,
+	     ?T("Fill in the form to search for any matching "
+		"XMPP User")),
+    Add = translate:translate(
+	    Lang,
+	    ?T(" (Add * to the end of field to match substring)")),
+    case Mod of
+	mod_vcard_mnesia -> Fill;
+	_ -> str:concat(Fill, Add)
     end.
 
-iq_get_vcard(Lang) ->
-    [#xmlel{name = <<"FN">>, attrs = [],
-	    children = [{xmlcdata, <<"ejabberd/mod_vcard">>}]},
-     #xmlel{name = <<"URL">>, attrs = [],
-	    children = [{xmlcdata, ?EJABBERD_URI}]},
-     #xmlel{name = <<"DESC">>, attrs = [],
-	    children =
-		[{xmlcdata,
-		  <<(translate:translate(Lang,
-					 <<"ejabberd vCard module">>))/binary,
-		    "\nCopyright (c) 2003-2015 ProcessOne">>}]}].
+-spec search_result(binary(), jid(), binary(), [xdata_field()]) -> xdata().
+search_result(Lang, JID, ServerHost, XFields) ->
+    Mod = gen_mod:db_mod(ServerHost, ?MODULE),
+    Reported = [mk_tfield(Label, Var, Lang) ||
+		   {Label, Var} <- Mod:search_reported(ServerHost)],
+    #xdata{type = result,
+	   title = <<(translate:translate(Lang,
+					  ?T("Search Results for ")))/binary,
+		     (jid:encode(JID))/binary>>,
+	   reported = Reported,
+	   items = lists:map(fun (Item) -> item_to_field(Item) end,
+			     search(ServerHost, XFields))}.
 
-find_xdata_el(#xmlel{children = SubEls}) ->
-    find_xdata_el1(SubEls).
+-spec item_to_field([{binary(), binary()}]) -> [xdata_field()].
+item_to_field(Items) ->
+    [mk_field(Var, Value) || {Var, Value} <- Items].
 
-find_xdata_el1([]) -> false;
-find_xdata_el1([#xmlel{name = Name, attrs = Attrs,
-		       children = SubEls}
-		| Els]) ->
-    case xml:get_attr_s(<<"xmlns">>, Attrs) of
-      ?NS_XDATA ->
-	  #xmlel{name = Name, attrs = Attrs, children = SubEls};
-      _ -> find_xdata_el1(Els)
-    end;
-find_xdata_el1([_ | Els]) -> find_xdata_el1(Els).
-
--define(LFIELD(Label, Var),
-	#xmlel{name = <<"field">>,
-	       attrs =
-		   [{<<"label">>, translate:translate(Lang, Label)},
-		    {<<"var">>, Var}],
-	       children = []}).
-
-search_result(Lang, JID, ServerHost, Data) ->
-    [#xmlel{name = <<"title">>, attrs = [],
-	    children =
-		[{xmlcdata,
-		  <<(translate:translate(Lang,
-					 <<"Search Results for ">>))/binary,
-		    (jlib:jid_to_string(JID))/binary>>}]},
-     #xmlel{name = <<"reported">>, attrs = [],
-	    children =
-		[?TLFIELD(<<"text-single">>, <<"Jabber ID">>,
-			  <<"jid">>),
-		 ?TLFIELD(<<"text-single">>, <<"Full Name">>, <<"fn">>),
-		 ?TLFIELD(<<"text-single">>, <<"Name">>, <<"first">>),
-		 ?TLFIELD(<<"text-single">>, <<"Middle Name">>,
-			  <<"middle">>),
-		 ?TLFIELD(<<"text-single">>, <<"Family Name">>,
-			  <<"last">>),
-		 ?TLFIELD(<<"text-single">>, <<"Nickname">>, <<"nick">>),
-		 ?TLFIELD(<<"text-single">>, <<"Birthday">>, <<"bday">>),
-		 ?TLFIELD(<<"text-single">>, <<"Country">>, <<"ctry">>),
-		 ?TLFIELD(<<"text-single">>, <<"City">>, <<"locality">>),
-		 ?TLFIELD(<<"text-single">>, <<"Email">>, <<"email">>),
-		 ?TLFIELD(<<"text-single">>, <<"Organization Name">>,
-			  <<"orgname">>),
-		 ?TLFIELD(<<"text-single">>, <<"Organization Unit">>,
-			  <<"orgunit">>)]}]
-      ++
-      lists:map(fun (R) -> record_to_item(ServerHost, R) end,
-		search(ServerHost, Data)).
-
--define(FIELD(Var, Val),
-	#xmlel{name = <<"field">>, attrs = [{<<"var">>, Var}],
-	       children =
-		   [#xmlel{name = <<"value">>, attrs = [],
-			   children = [{xmlcdata, Val}]}]}).
-
-record_to_item(LServer,
-	       [Username, FN, Family, Given, Middle, Nickname, BDay,
-		CTRY, Locality, EMail, OrgName, OrgUnit]) ->
-    #xmlel{name = <<"item">>, attrs = [],
-	   children =
-	       [?FIELD(<<"jid">>,
-		       <<Username/binary, "@", LServer/binary>>),
-		?FIELD(<<"fn">>, FN), ?FIELD(<<"last">>, Family),
-		?FIELD(<<"first">>, Given),
-		?FIELD(<<"middle">>, Middle),
-		?FIELD(<<"nick">>, Nickname), ?FIELD(<<"bday">>, BDay),
-		?FIELD(<<"ctry">>, CTRY),
-		?FIELD(<<"locality">>, Locality),
-		?FIELD(<<"email">>, EMail),
-		?FIELD(<<"orgname">>, OrgName),
-		?FIELD(<<"orgunit">>, OrgUnit)]};
-record_to_item(_LServer, #vcard_search{} = R) ->
-    {User, Server} = R#vcard_search.user,
-    #xmlel{name = <<"item">>, attrs = [],
-	   children =
-	       [?FIELD(<<"jid">>, <<User/binary, "@", Server/binary>>),
-		?FIELD(<<"fn">>, (R#vcard_search.fn)),
-		?FIELD(<<"last">>, (R#vcard_search.family)),
-		?FIELD(<<"first">>, (R#vcard_search.given)),
-		?FIELD(<<"middle">>, (R#vcard_search.middle)),
-		?FIELD(<<"nick">>, (R#vcard_search.nickname)),
-		?FIELD(<<"bday">>, (R#vcard_search.bday)),
-		?FIELD(<<"ctry">>, (R#vcard_search.ctry)),
-		?FIELD(<<"locality">>, (R#vcard_search.locality)),
-		?FIELD(<<"email">>, (R#vcard_search.email)),
-		?FIELD(<<"orgname">>, (R#vcard_search.orgname)),
-		?FIELD(<<"orgunit">>, (R#vcard_search.orgunit))]}.
-
-search(LServer, Data) ->
-    DBType = gen_mod:db_type(LServer, ?MODULE),
-    MatchSpec = make_matchspec(LServer, Data, DBType),
-    AllowReturnAll = gen_mod:get_module_opt(LServer, ?MODULE, allow_return_all,
-                                            fun(B) when is_boolean(B) -> B end,
-                                            false),
-    search(LServer, MatchSpec, AllowReturnAll, DBType).
-
-search(LServer, MatchSpec, AllowReturnAll, mnesia) ->
-    if (MatchSpec == #vcard_search{_ = '_'}) and
-	 not AllowReturnAll ->
-	   [];
-       true ->
-	   case catch mnesia:dirty_select(vcard_search,
-					  [{MatchSpec, [], ['$_']}])
-	       of
-	     {'EXIT', Reason} -> ?ERROR_MSG("~p", [Reason]), [];
-	     Rs ->
-		 case gen_mod:get_module_opt(LServer, ?MODULE, matches,
-                                             fun(infinity) -> infinity;
-                                                (I) when is_integer(I),
-                                                         I>0 ->
-                                                     I
-                                             end, ?JUD_MATCHES) of
-                     infinity ->
-                         Rs;
-                     Val ->
-                         lists:sublist(Rs, Val)
-                 end
-	   end
-    end;
-search(LServer, MatchSpec, AllowReturnAll, odbc) ->
-    if (MatchSpec == <<"">>) and not AllowReturnAll -> [];
-       true ->
-	   Limit = case gen_mod:get_module_opt(LServer, ?MODULE, matches,
-                                               fun(infinity) -> infinity;
-                                                  (I) when is_integer(I),
-                                                           I>0 ->
-                                                       I
-                                               end, ?JUD_MATCHES) of
-                       infinity ->
-                           <<"">>;
-                       Val ->
-                           [<<" LIMIT ">>,
-                            jlib:integer_to_binary(Val)]
-                   end,
-	   case catch ejabberd_odbc:sql_query(LServer,
-					      [<<"select username, fn, family, given, "
-						 "middle,        nickname, bday, ctry, "
-						 "locality,        email, orgname, orgunit "
-						 "from vcard_search ">>,
-					       MatchSpec, Limit, <<";">>])
-	       of
-	     {selected,
-	      [<<"username">>, <<"fn">>, <<"family">>, <<"given">>,
-	       <<"middle">>, <<"nickname">>, <<"bday">>, <<"ctry">>,
-	       <<"locality">>, <<"email">>, <<"orgname">>,
-	       <<"orgunit">>],
-	      Rs}
-		 when is_list(Rs) ->
-		 Rs;
-	     Error -> ?ERROR_MSG("~p", [Error]), []
-	   end
-    end;
-search(_LServer, _MatchSpec, _AllowReturnAll, riak) ->
-    [].
-
-make_matchspec(LServer, Data, mnesia) ->
-    GlobMatch = #vcard_search{_ = '_'},
-    Match = filter_fields(Data, GlobMatch, LServer, mnesia),
-    Match;
-make_matchspec(LServer, Data, odbc) ->
-    filter_fields(Data, <<"">>, LServer, odbc);
-make_matchspec(_LServer, _Data, riak) ->
-    [].
-
-filter_fields([], Match, _LServer, mnesia) -> Match;
-filter_fields([], Match, _LServer, odbc) ->
-    case Match of
-      <<"">> -> <<"">>;
-      _ -> [<<" where ">>, Match]
-    end;
-filter_fields([{SVar, [Val]} | Ds], Match, LServer,
-	      mnesia)
-    when is_binary(Val) and (Val /= <<"">>) ->
-    LVal = string2lower(Val),
-    NewMatch = case SVar of
-		 <<"user">> ->
-		     case gen_mod:get_module_opt(LServer, ?MODULE,
-                                                 search_all_hosts,
-                                                 fun(B) when is_boolean(B) ->
-                                                         B
-                                                 end, true)
-			 of
-		       true -> Match#vcard_search{luser = make_val(LVal)};
-		       false ->
-			   Host = find_my_host(LServer),
-			   Match#vcard_search{us = {make_val(LVal), Host}}
-		     end;
-		 <<"fn">> -> Match#vcard_search{lfn = make_val(LVal)};
-		 <<"last">> ->
-		     Match#vcard_search{lfamily = make_val(LVal)};
-		 <<"first">> ->
-		     Match#vcard_search{lgiven = make_val(LVal)};
-		 <<"middle">> ->
-		     Match#vcard_search{lmiddle = make_val(LVal)};
-		 <<"nick">> ->
-		     Match#vcard_search{lnickname = make_val(LVal)};
-		 <<"bday">> ->
-		     Match#vcard_search{lbday = make_val(LVal)};
-		 <<"ctry">> ->
-		     Match#vcard_search{lctry = make_val(LVal)};
-		 <<"locality">> ->
-		     Match#vcard_search{llocality = make_val(LVal)};
-		 <<"email">> ->
-		     Match#vcard_search{lemail = make_val(LVal)};
-		 <<"orgname">> ->
-		     Match#vcard_search{lorgname = make_val(LVal)};
-		 <<"orgunit">> ->
-		     Match#vcard_search{lorgunit = make_val(LVal)};
-		 _ -> Match
-	       end,
-    filter_fields(Ds, NewMatch, LServer, mnesia);
-filter_fields([{SVar, [Val]} | Ds], Match, LServer,
-	      odbc)
-    when is_binary(Val) and (Val /= <<"">>) ->
-    LVal = string2lower(Val),
-    NewMatch = case SVar of
-		 <<"user">> -> make_val(Match, <<"lusername">>, LVal);
-		 <<"fn">> -> make_val(Match, <<"lfn">>, LVal);
-		 <<"last">> -> make_val(Match, <<"lfamily">>, LVal);
-		 <<"first">> -> make_val(Match, <<"lgiven">>, LVal);
-		 <<"middle">> -> make_val(Match, <<"lmiddle">>, LVal);
-		 <<"nick">> -> make_val(Match, <<"lnickname">>, LVal);
-		 <<"bday">> -> make_val(Match, <<"lbday">>, LVal);
-		 <<"ctry">> -> make_val(Match, <<"lctry">>, LVal);
-		 <<"locality">> ->
-		     make_val(Match, <<"llocality">>, LVal);
-		 <<"email">> -> make_val(Match, <<"lemail">>, LVal);
-		 <<"orgname">> -> make_val(Match, <<"lorgname">>, LVal);
-		 <<"orgunit">> -> make_val(Match, <<"lorgunit">>, LVal);
-		 _ -> Match
-	       end,
-    filter_fields(Ds, NewMatch, LServer, odbc);
-filter_fields([_ | Ds], Match, LServer, DBType) ->
-    filter_fields(Ds, Match, LServer, DBType).
-
-make_val(Match, Field, Val) ->
-    Condition = case str:suffix(<<"*">>, Val) of
-		  true ->
-		      Val1 = str:substr(Val, 1, byte_size(Val) - 1),
-		      SVal = <<(ejabberd_odbc:escape_like(Val1))/binary,
-			       "%">>,
-		      [Field, <<" LIKE '">>, SVal, <<"'">>];
-		  _ ->
-		      SVal = ejabberd_odbc:escape(Val),
-		      [Field, <<" = '">>, SVal, <<"'">>]
-		end,
-    case Match of
-      <<"">> -> Condition;
-      _ -> [Match, <<" and ">>, Condition]
-    end.
-
-make_val(Val) ->
-    case str:suffix(<<"*">>, Val) of
-      true -> [str:substr(Val, 1, byte_size(Val) - 1)] ++ '_';
-      _ -> Val
-    end.
-
-find_my_host(LServer) ->
-    Parts = str:tokens(LServer, <<".">>),
-    find_my_host(Parts, ?MYHOSTS).
-
-find_my_host([], _Hosts) -> ?MYNAME;
-find_my_host([_ | Tail] = Parts, Hosts) ->
-    Domain = parts_to_string(Parts),
-    case lists:member(Domain, Hosts) of
-      true -> Domain;
-      false -> find_my_host(Tail, Hosts)
-    end.
-
-parts_to_string(Parts) ->
-    str:strip(list_to_binary(
-                lists:map(fun (S) -> <<S/binary, $.>> end, Parts)),
-              right, $.).
+-spec search(binary(), [xdata_field()]) -> [binary()].
+search(LServer, XFields) ->
+    Data = [{Var, Vals} || #xdata_field{var = Var, values = Vals} <- XFields],
+    Mod = gen_mod:db_mod(LServer, ?MODULE),
+    AllowReturnAll = mod_vcard_opt:allow_return_all(LServer),
+    MaxMatch = mod_vcard_opt:matches(LServer),
+    Mod:search(LServer, Data, AllowReturnAll, MaxMatch).
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-
-set_vcard_t(R, _) ->
-    US = R#vcard.us,
-    User = US,
-    VCARD = R#vcard.vcard,
-    FN = xml:get_path_s(VCARD, [{elem, <<"FN">>}, cdata]),
-    Family = xml:get_path_s(VCARD,
-			    [{elem, <<"N">>}, {elem, <<"FAMILY">>}, cdata]),
-    Given = xml:get_path_s(VCARD,
-			   [{elem, <<"N">>}, {elem, <<"GIVEN">>}, cdata]),
-    Middle = xml:get_path_s(VCARD,
-			    [{elem, <<"N">>}, {elem, <<"MIDDLE">>}, cdata]),
-    Nickname = xml:get_path_s(VCARD,
-			      [{elem, <<"NICKNAME">>}, cdata]),
-    BDay = xml:get_path_s(VCARD,
-			  [{elem, <<"BDAY">>}, cdata]),
-    CTRY = xml:get_path_s(VCARD,
-			  [{elem, <<"ADR">>}, {elem, <<"CTRY">>}, cdata]),
-    Locality = xml:get_path_s(VCARD,
-			      [{elem, <<"ADR">>}, {elem, <<"LOCALITY">>},
-			       cdata]),
-    EMail = xml:get_path_s(VCARD,
-			   [{elem, <<"EMAIL">>}, cdata]),
-    OrgName = xml:get_path_s(VCARD,
-			     [{elem, <<"ORG">>}, {elem, <<"ORGNAME">>}, cdata]),
-    OrgUnit = xml:get_path_s(VCARD,
-			     [{elem, <<"ORG">>}, {elem, <<"ORGUNIT">>}, cdata]),
-    {LUser, _LServer} = US,
-    LFN = string2lower(FN),
-    LFamily = string2lower(Family),
-    LGiven = string2lower(Given),
-    LMiddle = string2lower(Middle),
-    LNickname = string2lower(Nickname),
-    LBDay = string2lower(BDay),
-    LCTRY = string2lower(CTRY),
-    LLocality = string2lower(Locality),
-    LEMail = string2lower(EMail),
-    LOrgName = string2lower(OrgName),
-    LOrgUnit = string2lower(OrgUnit),
-    mnesia:write(#vcard_search{us = US, user = User,
-                               luser = LUser, fn = FN, lfn = LFN,
-                               family = Family, lfamily = LFamily,
-                               given = Given, lgiven = LGiven,
-                               middle = Middle, lmiddle = LMiddle,
-                               nickname = Nickname,
-                               lnickname = LNickname, bday = BDay,
-                               lbday = LBDay, ctry = CTRY, lctry = LCTRY,
-                               locality = Locality,
-                               llocality = LLocality, email = EMail,
-                               lemail = LEMail, orgname = OrgName,
-                               lorgname = LOrgName, orgunit = OrgUnit,
-                               lorgunit = LOrgUnit}).
-
-reindex_vcards() ->
-    F = fun () -> mnesia:foldl(fun set_vcard_t/2, [], vcard)
-	end,
-    mnesia:transaction(F).
-
+-spec remove_user(binary(), binary()) -> ok.
 remove_user(User, Server) ->
-    LUser = jlib:nodeprep(User),
-    LServer = jlib:nameprep(Server),
-    remove_user(LUser, LServer,
-		gen_mod:db_type(LServer, ?MODULE)).
+    LUser = jid:nodeprep(User),
+    LServer = jid:nameprep(Server),
+    Mod = gen_mod:db_mod(LServer, ?MODULE),
+    Mod:remove_user(LUser, LServer),
+    ets_cache:delete(?VCARD_CACHE, {LUser, LServer}, cache_nodes(Mod, LServer)).
 
-remove_user(LUser, LServer, mnesia) ->
-    US = {LUser, LServer},
-    F = fun () ->
-		mnesia:delete({vcard, US}),
-		mnesia:delete({vcard_search, US})
-	end,
-    mnesia:transaction(F);
-remove_user(LUser, LServer, odbc) ->
-    Username = ejabberd_odbc:escape(LUser),
-    ejabberd_odbc:sql_transaction(LServer,
-				  [[<<"delete from vcard where username='">>,
-				    Username, <<"';">>],
-				   [<<"delete from vcard_search where lusername='">>,
-				    Username, <<"';">>]]);
-remove_user(LUser, LServer, riak) ->
-    {atomic, ejabberd_riak:delete(vcard, {LUser, LServer})}.
-
-update_tables() ->
-    update_vcard_table(),
-    update_vcard_search_table().
-
-update_vcard_table() ->
-    Fields = record_info(fields, vcard),
-    case mnesia:table_info(vcard, attributes) of
-      Fields ->
-          ejabberd_config:convert_table_to_binary(
-            vcard, Fields, set,
-            fun(#vcard{us = {U, _}}) -> U end,
-            fun(#vcard{us = {U, S}, vcard = El} = R) ->
-                    R#vcard{us = {iolist_to_binary(U),
-                                  iolist_to_binary(S)},
-                            vcard = xml:to_xmlel(El)}
-            end);
-      _ ->
-	  ?INFO_MSG("Recreating vcard table", []),
-	  mnesia:transform_table(vcard, ignore, Fields)
+-spec init_cache(module(), binary(), gen_mod:opts()) -> ok.
+init_cache(Mod, Host, Opts) ->
+    case use_cache(Mod, Host) of
+	true ->
+	    CacheOpts = cache_opts(Host, Opts),
+	    ets_cache:new(?VCARD_CACHE, CacheOpts);
+	false ->
+	    ets_cache:delete(?VCARD_CACHE)
     end.
 
-update_vcard_search_table() ->
-    Fields = record_info(fields, vcard_search),
-    case mnesia:table_info(vcard_search, attributes) of
-      Fields ->
-          ejabberd_config:convert_table_to_binary(
-            vcard_search, Fields, set,
-            fun(#vcard_search{us = {U, _}}) -> U end,
-            fun(#vcard_search{} = VS) ->
-                    [vcard_search | L] = tuple_to_list(VS),
-                    NewL = lists:map(
-                             fun({U, S}) ->
-                                     {iolist_to_binary(U),
-                                      iolist_to_binary(S)};
-                                (Str) ->
-                                     iolist_to_binary(Str)
-                             end, L),
-                    list_to_tuple([vcard_search | NewL])
-            end);
-      _ ->
-	  ?INFO_MSG("Recreating vcard_search table", []),
-	  mnesia:transform_table(vcard_search, ignore, Fields)
+-spec cache_opts(binary(), gen_mod:opts()) -> [proplists:property()].
+cache_opts(_Host, Opts) ->
+    MaxSize = mod_vcard_opt:cache_size(Opts),
+    CacheMissed = mod_vcard_opt:cache_missed(Opts),
+    LifeTime = mod_vcard_opt:cache_life_time(Opts),
+    [{max_size, MaxSize}, {cache_missed, CacheMissed}, {life_time, LifeTime}].
+
+-spec use_cache(module(), binary()) -> boolean().
+use_cache(Mod, Host) ->
+    case erlang:function_exported(Mod, use_cache, 1) of
+	true -> Mod:use_cache(Host);
+	false -> mod_vcard_opt:use_cache(Host)
     end.
 
-vcard_schema() ->
-    {record_info(fields, vcard), #vcard{}}.
+-spec cache_nodes(module(), binary()) -> [node()].
+cache_nodes(Mod, Host) ->
+    case erlang:function_exported(Mod, cache_nodes, 1) of
+	true -> Mod:cache_nodes(Host);
+	false -> ejabberd_cluster:get_nodes()
+    end.
 
-export(_Server) ->   
-    [{vcard,
-      fun(Host, #vcard{us = {LUser, LServer}, vcard = VCARD})
-            when LServer == Host ->
-              Username = ejabberd_odbc:escape(LUser),
-              SVCARD =
-                  ejabberd_odbc:escape(xml:element_to_binary(VCARD)),
-              [[<<"delete from vcard where username='">>, Username, <<"';">>],
-               [<<"insert into vcard(username, vcard) values ('">>,
-                Username, <<"', '">>, SVCARD, <<"');">>]];
-         (_Host, _R) ->
-              []
-      end},
-     {vcard_search,
-      fun(Host, #vcard_search{user = {User, LServer}, luser = LUser,
-                              fn = FN, lfn = LFN, family = Family,
-                              lfamily = LFamily, given = Given,
-                              lgiven = LGiven, middle = Middle,
-                              lmiddle = LMiddle, nickname = Nickname,
-                              lnickname = LNickname, bday = BDay,
-                              lbday = LBDay, ctry = CTRY, lctry = LCTRY,
-                              locality = Locality, llocality = LLocality,
-                              email = EMail, lemail = LEMail,
-                              orgname = OrgName, lorgname = LOrgName,
-                              orgunit = OrgUnit, lorgunit = LOrgUnit})
-            when LServer == Host ->
-              Username = ejabberd_odbc:escape(User),
-              LUsername = ejabberd_odbc:escape(LUser),
-              SFN = ejabberd_odbc:escape(FN),
-              SLFN = ejabberd_odbc:escape(LFN),
-              SFamily = ejabberd_odbc:escape(Family),
-              SLFamily = ejabberd_odbc:escape(LFamily),
-              SGiven = ejabberd_odbc:escape(Given),
-              SLGiven = ejabberd_odbc:escape(LGiven),
-              SMiddle = ejabberd_odbc:escape(Middle),
-              SLMiddle = ejabberd_odbc:escape(LMiddle),
-              SNickname = ejabberd_odbc:escape(Nickname),
-              SLNickname = ejabberd_odbc:escape(LNickname),
-              SBDay = ejabberd_odbc:escape(BDay),
-              SLBDay = ejabberd_odbc:escape(LBDay),
-              SCTRY = ejabberd_odbc:escape(CTRY),
-              SLCTRY = ejabberd_odbc:escape(LCTRY),
-              SLocality = ejabberd_odbc:escape(Locality),
-              SLLocality = ejabberd_odbc:escape(LLocality),
-              SEMail = ejabberd_odbc:escape(EMail),
-              SLEMail = ejabberd_odbc:escape(LEMail),
-              SOrgName = ejabberd_odbc:escape(OrgName),
-              SLOrgName = ejabberd_odbc:escape(LOrgName),
-              SOrgUnit = ejabberd_odbc:escape(OrgUnit),
-              SLOrgUnit = ejabberd_odbc:escape(LOrgUnit),
-              [[<<"delete from vcard_search where lusername='">>,
-                LUsername, <<"';">>],
-               [<<"insert into vcard_search(        username, "
-                  "lusername, fn, lfn, family, lfamily, "
-                  "       given, lgiven, middle, lmiddle, "
-                  "nickname, lnickname,        bday, lbday, "
-                  "ctry, lctry, locality, llocality,   "
-                  "     email, lemail, orgname, lorgname, "
-                  "orgunit, lorgunit)values (">>,
-                <<"        '">>, Username, <<"', '">>, LUsername,
-                <<"',        '">>, SFN, <<"', '">>, SLFN,
-                <<"',        '">>, SFamily, <<"', '">>, SLFamily,
-                <<"',        '">>, SGiven, <<"', '">>, SLGiven,
-                <<"',        '">>, SMiddle, <<"', '">>, SLMiddle,
-                <<"',        '">>, SNickname, <<"', '">>, SLNickname,
-                <<"',        '">>, SBDay, <<"', '">>, SLBDay,
-                <<"',        '">>, SCTRY, <<"', '">>, SLCTRY,
-                <<"',        '">>, SLocality, <<"', '">>, SLLocality,
-                <<"',        '">>, SEMail, <<"', '">>, SLEMail,
-                <<"',        '">>, SOrgName, <<"', '">>, SLOrgName,
-                <<"',        '">>, SOrgUnit, <<"', '">>, SLOrgUnit,
-                <<"');">>]];
-         (_Host, _R) ->
-              []
-      end}].
+import_info() ->
+    [{<<"vcard">>, 3}, {<<"vcard_search">>, 24}].
 
-import(LServer) ->
-    [{<<"select username, vcard from vcard;">>,
-      fun([LUser, SVCard]) ->
-              #xmlel{} = VCARD = xml_stream:parse_element(SVCard),
-              #vcard{us = {LUser, LServer}, vcard = VCARD}
-      end},
-     {<<"select username, lusername, fn, lfn, family, lfamily, "
-        "given, lgiven, middle, lmiddle, nickname, lnickname, "
-        "bday, lbday, ctry, lctry, locality, llocality, email, "
-        "lemail, orgname, lorgname, orgunit, lorgunit from vcard_search;">>,
-      fun([User, LUser, FN, LFN,
-           Family, LFamily, Given, LGiven,
-           Middle, LMiddle, Nickname, LNickname,
-           BDay, LBDay, CTRY, LCTRY, Locality, LLocality,
-           EMail, LEMail, OrgName, LOrgName, OrgUnit, LOrgUnit]) ->
-              #vcard_search{us = {LUser, LServer},
-                            user = {User, LServer}, luser = LUser,
-                            fn = FN, lfn = LFN, family = Family,
-                            lfamily = LFamily, given = Given,
-                            lgiven = LGiven, middle = Middle,
-                            lmiddle = LMiddle, nickname = Nickname,
-                            lnickname = LNickname, bday = BDay,
-                            lbday = LBDay, ctry = CTRY, lctry = LCTRY,
-                            locality = Locality, llocality = LLocality,
-                            email = EMail, lemail = LEMail,
-                            orgname = OrgName, lorgname = LOrgName,
-                            orgunit = OrgUnit, lorgunit = LOrgUnit}
-      end}].
+import_start(LServer, DBType) ->
+    Mod = gen_mod:db_mod(DBType, ?MODULE),
+    Mod:init(LServer, []).
 
-import(_LServer, mnesia, #vcard{} = VCard) ->
-    mnesia:dirty_write(VCard);
-import(_LServer, mnesia, #vcard_search{} = S) ->
-    mnesia:dirty_write(S);
-import(_LServer, riak, #vcard{us = {LUser, _}, vcard = El} = VCard) ->
-    FN = xml:get_path_s(El, [{elem, <<"FN">>}, cdata]),
-    Family = xml:get_path_s(El,
-			    [{elem, <<"N">>}, {elem, <<"FAMILY">>}, cdata]),
-    Given = xml:get_path_s(El,
-			   [{elem, <<"N">>}, {elem, <<"GIVEN">>}, cdata]),
-    Middle = xml:get_path_s(El,
-			    [{elem, <<"N">>}, {elem, <<"MIDDLE">>}, cdata]),
-    Nickname = xml:get_path_s(El,
-			      [{elem, <<"NICKNAME">>}, cdata]),
-    BDay = xml:get_path_s(El,
-			  [{elem, <<"BDAY">>}, cdata]),
-    CTRY = xml:get_path_s(El,
-			  [{elem, <<"ADR">>}, {elem, <<"CTRY">>}, cdata]),
-    Locality = xml:get_path_s(El,
-			      [{elem, <<"ADR">>}, {elem, <<"LOCALITY">>},
-			       cdata]),
-    EMail1 = xml:get_path_s(El,
-			    [{elem, <<"EMAIL">>}, {elem, <<"USERID">>}, cdata]),
-    EMail2 = xml:get_path_s(El,
-			    [{elem, <<"EMAIL">>}, cdata]),
-    OrgName = xml:get_path_s(El,
-			     [{elem, <<"ORG">>}, {elem, <<"ORGNAME">>}, cdata]),
-    OrgUnit = xml:get_path_s(El,
-			     [{elem, <<"ORG">>}, {elem, <<"ORGUNIT">>}, cdata]),
-    EMail = case EMail1 of
-	      <<"">> -> EMail2;
-	      _ -> EMail1
-	    end,
-    LFN = string2lower(FN),
-    LFamily = string2lower(Family),
-    LGiven = string2lower(Given),
-    LMiddle = string2lower(Middle),
-    LNickname = string2lower(Nickname),
-    LBDay = string2lower(BDay),
-    LCTRY = string2lower(CTRY),
-    LLocality = string2lower(Locality),
-    LEMail = string2lower(EMail),
-    LOrgName = string2lower(OrgName),
-    LOrgUnit = string2lower(OrgUnit),
-    ejabberd_riak:put(VCard, vcard_schema(),
-                      [{'2i', [{<<"user">>, LUser},
-                               {<<"luser">>, LUser},
-                               {<<"fn">>, FN},
-                               {<<"lfn">>, LFN},
-                               {<<"family">>, Family},
-                               {<<"lfamily">>, LFamily},
-                               {<<"given">>, Given},
-                               {<<"lgiven">>, LGiven},
-                               {<<"middle">>, Middle},
-                               {<<"lmiddle">>, LMiddle},
-                               {<<"nickname">>, Nickname},
-                               {<<"lnickname">>, LNickname},
-                               {<<"bday">>, BDay},
-                               {<<"lbday">>, LBDay},
-                               {<<"ctry">>, CTRY},
-                               {<<"lctry">>, LCTRY},
-                               {<<"locality">>, Locality},
-                               {<<"llocality">>, LLocality},
-                               {<<"email">>, EMail},
-                               {<<"lemail">>, LEMail},
-                               {<<"orgname">>, OrgName},
-                               {<<"lorgname">>, LOrgName},
-                               {<<"orgunit">>, OrgUnit},
-                               {<<"lorgunit">>, LOrgUnit}]}]);
-import(_LServer, riak, #vcard_search{}) ->
-    ok;
-import(_, _, _) ->
-    pass.
+import(LServer, {sql, _}, DBType, Tab, L) ->
+    Mod = gen_mod:db_mod(DBType, ?MODULE),
+    Mod:import(LServer, Tab, L).
+
+export(LServer) ->
+    Mod = gen_mod:db_mod(LServer, ?MODULE),
+    Mod:export(LServer).
+
+depends(_Host, _Opts) ->
+    [].
+
+mod_opt_type(allow_return_all) ->
+    econf:bool();
+mod_opt_type(name) ->
+    econf:binary();
+mod_opt_type(matches) ->
+    econf:pos_int(infinity);
+mod_opt_type(search) ->
+    econf:bool();
+mod_opt_type(host) ->
+    econf:host();
+mod_opt_type(hosts) ->
+    econf:hosts();
+mod_opt_type(db_type) ->
+    econf:db_type(?MODULE);
+mod_opt_type(use_cache) ->
+    econf:bool();
+mod_opt_type(cache_size) ->
+    econf:pos_int(infinity);
+mod_opt_type(cache_missed) ->
+    econf:bool();
+mod_opt_type(cache_life_time) ->
+    econf:timeout(second, infinity);
+mod_opt_type(vcard) ->
+    econf:vcard_temp().
+
+mod_options(Host) ->
+    [{allow_return_all, false},
+     {host, <<"vjud.", Host/binary>>},
+     {hosts, []},
+     {matches, 30},
+     {search, false},
+     {name, ?T("vCard User Search")},
+     {vcard, undefined},
+     {db_type, ejabberd_config:default_db(Host, ?MODULE)},
+     {use_cache, ejabberd_option:use_cache(Host)},
+     {cache_size, ejabberd_option:cache_size(Host)},
+     {cache_missed, ejabberd_option:cache_missed(Host)},
+     {cache_life_time, ejabberd_option:cache_life_time(Host)}].
+
+mod_doc() ->
+    #{desc =>
+          ?T("This module allows end users to store and retrieve "
+             "their vCard, and to retrieve other users vCards, "
+             "as defined in https://xmpp.org/extensions/xep-0054.html"
+             "[XEP-0054: vcard-temp]. The module also implements an "
+             "uncomplicated Jabber User Directory based on the vCards "
+             "of these users. Moreover, it enables the server to send "
+             "its vCard when queried."),
+      opts =>
+          [{allow_return_all,
+            #{value => "true | false",
+              desc =>
+                  ?T("This option enables you to specify if search "
+                     "operations with empty input fields should return "
+                     "all users who added some information to their vCard. "
+                     "The default value is 'false'.")}},
+           {host,
+            #{desc => ?T("Deprecated. Use 'hosts' instead.")}},
+           {hosts,
+            #{value => ?T("[Host, ...]"),
+              desc =>
+                  ?T("This option defines the Jabber IDs of the service. "
+                     "If the 'hosts' option is not specified, the only Jabber ID will "
+                     "be the hostname of the virtual host with the prefix \"vjud.\". "
+                     "The keyword '@HOST@' is replaced with the real virtual host name.")}},
+           {name,
+            #{value => ?T("Name"),
+              desc =>
+                  ?T("The value of the service name. This name is only visible in some "
+                     "clients that support https://xmpp.org/extensions/xep-0030.html"
+                     "[XEP-0030: Service Discovery]. The default is 'vCard User Search'.")}},
+           {matches,
+            #{value => "pos_integer() | infinity",
+              desc =>
+                  ?T("With this option, the number of reported search results "
+                     "can be limited. If the option's value is set to 'infinity', "
+                     "all search results are reported. The default value is '30'.")}},
+           {search,
+            #{value => "true | false",
+              desc =>
+                  ?T("This option specifies whether the search functionality "
+                     "is enabled or not. If disabled, the options 'hosts', 'name' "
+                     "and 'vcard' will be ignored and the Jabber User Directory "
+                     "service will not appear in the Service Discovery item list. "
+                     "The default value is 'false'.")}},
+           {db_type,
+            #{value => "mnesia | sql | ldap",
+              desc =>
+                  ?T("Same as top-level _`default_db`_ option, but applied to this module only.")}},
+           {use_cache,
+            #{value => "true | false",
+              desc =>
+                  ?T("Same as top-level _`use_cache`_ option, but applied to this module only.")}},
+           {cache_size,
+            #{value => "pos_integer() | infinity",
+              desc =>
+                  ?T("Same as top-level _`cache_size`_ option, but applied to this module only.")}},
+           {cache_missed,
+            #{value => "true | false",
+              desc =>
+                  ?T("Same as top-level _`cache_missed`_ option, but applied to this module only.")}},
+           {cache_life_time,
+            #{value => "timeout()",
+              desc =>
+                  ?T("Same as top-level _`cache_life_time`_ option, but applied to this module only.")}},
+           {vcard,
+            #{value => ?T("vCard"),
+              desc =>
+                  ?T("A custom vCard of the server that will be displayed "
+                     "by some XMPP clients in Service Discovery. The value of "
+                     "'vCard' is a YAML map constructed from an XML representation "
+                     "of vCard. Since the representation has no attributes, "
+                     "the mapping is straightforward."),
+              example =>
+                  [{?T("For example, the following XML representation of vCard:"),
+                    ["<vCard xmlns='vcard-temp'>",
+                     "  <FN>Conferences</FN>",
+                     "  <ADR>",
+                     "    <WORK/>",
+                     "    <STREET>Elm Street</STREET>",
+                     "  </ADR>",
+                     "</vCard>"]},
+                   {?T("will be translated to:"),
+                    ["vcard:",
+                     "  fn: Conferences",
+                     "  adr:",
+                     "    -",
+                     "      work: true",
+                     "      street: Elm Street"]}]}}]}.

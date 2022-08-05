@@ -1,0 +1,59 @@
+version: '3.7'
+
+services:
+  mysql:
+    image: mysql:latest
+    container_name: ejabberd-mysql
+    volumes:
+      - mysqldata:/var/lib/mysql
+      - ../../sql/mysql.sql:/docker-entrypoint-initdb.d/mysql.sql:ro
+    command: --default-authentication-plugin=mysql_native_password
+    restart: always
+    ports:
+      - 3306:3306
+    environment:
+      MYSQL_ROOT_PASSWORD: root
+      MYSQL_DATABASE: ejabberd_test
+      MYSQL_USER: ejabberd_test
+      MYSQL_PASSWORD: ejabberd_test
+
+  mssql:
+    image: mcr.microsoft.com/mssql/server
+    container_name: ejabberd-mssql
+    volumes:
+      - mssqldata:/var/opt/mssql
+      - ./db/mssql/initdb/initdb_mssql.sql:/initdb_mssql.sql:ro
+      - ../../sql/mssql.sql:/mssql.sql:ro
+    restart: always
+    ports:
+      - 1433:1433
+    environment:
+      ACCEPT_EULA: Y
+      SA_PASSWORD: ejabberd_Test1
+
+  postgres:
+    image: postgres:latest
+    container_name: ejabberd-postgres
+    volumes:
+      - pgsqldata:/var/lib/postgresql/data
+      - ../../sql/pg.sql:/docker-entrypoint-initdb.d/pg.sql:ro
+    ports:
+      - 5432:5432
+    environment:
+      POSTGRES_PASSWORD: ejabberd_test
+      POSTGRES_USER: ejabberd_test
+      POSTGRES_DB: ejabberd_test
+
+  redis:
+    image: redis:latest
+    container_name: ejabberd-redis
+    ports:
+      - 6379:6379
+
+volumes:
+    mysqldata:
+      name: ejabberd-mysqldata
+    mssqldata:
+      name: ejabberd-mssqldata
+    pgsqldata:
+      name: ejabberd-pgsqldata

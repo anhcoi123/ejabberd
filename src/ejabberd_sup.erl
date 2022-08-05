@@ -5,7 +5,7 @@
 %%% Created : 31 Jan 2003 by Alexey Shchepin <alexey@process-one.net>
 %%%
 %%%
-%%% ejabberd, Copyright (C) 2002-2015   ProcessOne
+%%% ejabberd, Copyright (C) 2002-2022   ProcessOne
 %%%
 %%% This program is free software; you can redistribute it and/or
 %%% modify it under the terms of the GNU General Public License as
@@ -28,153 +28,66 @@
 
 -behaviour(supervisor).
 
--export([start_link/0, init/1]).
+-export([start_link/0, init/1, stop_child/1]).
+
+-define(SHUTDOWN_TIMEOUT, timer:minutes(1)).
 
 start_link() ->
     supervisor:start_link({local, ?MODULE}, ?MODULE, []).
 
 init([]) ->
-    Hooks =
-	{ejabberd_hooks,
-	 {ejabberd_hooks, start_link, []},
-	 permanent,
-	 brutal_kill,
-	 worker,
-	 [ejabberd_hooks]},
-    NodeGroups =
-	{ejabberd_node_groups,
-	 {ejabberd_node_groups, start_link, []},
-	 permanent,
-	 brutal_kill,
-	 worker,
-	 [ejabberd_node_groups]},
-    SystemMonitor =
-	{ejabberd_system_monitor,
-	 {ejabberd_system_monitor, start_link, []},
-	 permanent,
-	 brutal_kill,
-	 worker,
-	 [ejabberd_system_monitor]},
-    Router =
-	{ejabberd_router,
-	 {ejabberd_router, start_link, []},
-	 permanent,
-	 brutal_kill,
-	 worker,
-	 [ejabberd_router]},
-    Router_multicast =
-	{ejabberd_router_multicast,
-	 {ejabberd_router_multicast, start_link, []},
-	 permanent,
-	 brutal_kill,
-	 worker,
-	 [ejabberd_router_multicast]},
-    S2S =
-	{ejabberd_s2s,
-	 {ejabberd_s2s, start_link, []},
-	 permanent,
-	 brutal_kill,
-	 worker,
-	 [ejabberd_s2s]},
-    Local =
-	{ejabberd_local,
-	 {ejabberd_local, start_link, []},
-	 permanent,
-	 brutal_kill,
-	 worker,
-	 [ejabberd_local]},
-    Captcha =
-	{ejabberd_captcha,
-	 {ejabberd_captcha, start_link, []},
-	 permanent,
-	 brutal_kill,
-	 worker,
-	 [ejabberd_captcha]},
-    Listener =
-	{ejabberd_listener,
-	 {ejabberd_listener, start_link, []},
-	 permanent,
-	 infinity,
-	 supervisor,
-	 [ejabberd_listener]},
-    ReceiverSupervisor =
-	{ejabberd_receiver_sup,
-	 {ejabberd_tmp_sup, start_link,
-	  [ejabberd_receiver_sup, ejabberd_receiver]},
-	 permanent,
-	 infinity,
-	 supervisor,
-	 [ejabberd_tmp_sup]},
-    C2SSupervisor =
-	{ejabberd_c2s_sup,
-	 {ejabberd_tmp_sup, start_link, [ejabberd_c2s_sup, ejabberd_c2s]},
-	 permanent,
-	 infinity,
-	 supervisor,
-	 [ejabberd_tmp_sup]},
-    S2SInSupervisor =
-	{ejabberd_s2s_in_sup,
-	 {ejabberd_tmp_sup, start_link,
-	  [ejabberd_s2s_in_sup, ejabberd_s2s_in]},
-	 permanent,
-	 infinity,
-	 supervisor,
-	 [ejabberd_tmp_sup]},
-    S2SOutSupervisor =
-	{ejabberd_s2s_out_sup,
-	 {ejabberd_tmp_sup, start_link,
-	  [ejabberd_s2s_out_sup, ejabberd_s2s_out]},
-	 permanent,
-	 infinity,
-	 supervisor,
-	 [ejabberd_tmp_sup]},
-    ServiceSupervisor =
-	{ejabberd_service_sup,
-	 {ejabberd_tmp_sup, start_link,
-	  [ejabberd_service_sup, ejabberd_service]},
-	 permanent,
-	 infinity,
-	 supervisor,
-	 [ejabberd_tmp_sup]},
-    HTTPSupervisor =
-	{ejabberd_http_sup,
-	 {ejabberd_tmp_sup, start_link,
-	  [ejabberd_http_sup, ejabberd_http]},
-	 permanent,
-	 infinity,
-	 supervisor,
-	 [ejabberd_tmp_sup]},
-    FrontendSocketSupervisor =
-	{ejabberd_frontend_socket_sup,
-	 {ejabberd_tmp_sup, start_link,
-	  [ejabberd_frontend_socket_sup, ejabberd_frontend_socket]},
-	 permanent,
-	 infinity,
-	 supervisor,
-	 [ejabberd_tmp_sup]},
-    IQSupervisor =
-	{ejabberd_iq_sup,
-	 {ejabberd_tmp_sup, start_link,
-	  [ejabberd_iq_sup, gen_iq_handler]},
-	 permanent,
-	 infinity,
-	 supervisor,
-	 [ejabberd_tmp_sup]},
     {ok, {{one_for_one, 10, 1},
-	  [Hooks,
-	   NodeGroups,
-	   SystemMonitor,
-	   Router,
-	   Router_multicast,
-	   S2S,
-	   Local,
-	   Captcha,
-	   ReceiverSupervisor,
-	   C2SSupervisor,
-	   S2SInSupervisor,
-	   S2SOutSupervisor,
-	   ServiceSupervisor,
-	   HTTPSupervisor,
-	   IQSupervisor,
-	   FrontendSocketSupervisor,
-	   Listener]}}.
+	  [worker(ejabberd_systemd),
+	   worker(ejabberd_hooks),
+	   worker(ejabberd_cluster),
+	   worker(translate),
+	   worker(ejabberd_access_permissions),
+	   worker(ejabberd_ctl),
+	   worker(ejabberd_commands),
+	   worker(ejabberd_admin),
+	   supervisor(ejabberd_listener),
+	   worker(ejabberd_pkix),
+	   worker(acl),
+	   worker(ejabberd_shaper),
+	   supervisor(ejabberd_db_sup),
+	   supervisor(ejabberd_backend_sup),
+	   supervisor(ejabberd_sql_sup),
+	   worker(ejabberd_iq),
+	   worker(ejabberd_router),
+	   worker(ejabberd_router_multicast),
+	   worker(ejabberd_local),
+	   worker(ejabberd_sm),
+	   simple_supervisor(ejabberd_s2s_in),
+	   simple_supervisor(ejabberd_s2s_out),
+	   worker(ejabberd_s2s),
+	   simple_supervisor(ejabberd_service),
+	   worker(ejabberd_captcha),
+	   worker(ext_mod),
+	   supervisor(ejabberd_gen_mod_sup, gen_mod),
+	   worker(ejabberd_acme),
+	   worker(ejabberd_auth),
+	   worker(ejabberd_oauth),
+	   worker(ejabberd_batch)]}}.
+
+-spec stop_child(atom()) -> ok.
+stop_child(Name) ->
+    _ = supervisor:terminate_child(?MODULE, Name),
+    _ = supervisor:delete_child(?MODULE, Name),
+    ok.
+
+%%%===================================================================
+%%% Internal functions
+%%%===================================================================
+worker(Mod) ->
+    {Mod, {Mod, start_link, []}, permanent, ?SHUTDOWN_TIMEOUT, worker, [Mod]}.
+
+supervisor(Mod) ->
+    supervisor(Mod, Mod).
+
+supervisor(Name, Mod) ->
+    {Name, {Mod, start_link, []}, permanent, infinity, supervisor, [Mod]}.
+
+simple_supervisor(Mod) ->
+    Name = list_to_atom(atom_to_list(Mod) ++ "_sup"),
+    {Name, {ejabberd_tmp_sup, start_link, [Name, Mod]},
+     permanent, infinity, supervisor, [ejabberd_tmp_sup]}.

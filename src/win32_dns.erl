@@ -5,7 +5,7 @@
 %%% Created : 5 Mar 2009 by Geoff Cant
 %%%
 %%%
-%%% ejabberd, Copyright (C) 2002-2015   ProcessOne
+%%% ejabberd, Copyright (C) 2002-2022   ProcessOne
 %%%
 %%% This program is free software; you can redistribute it and/or
 %%% modify it under the terms of the GNU General Public License as
@@ -26,7 +26,6 @@
 -module(win32_dns).
 -export([get_nameservers/0]).
 
--include("ejabberd.hrl").
 -include("logger.hrl").
 
 -define(IF_KEY, "\\hklm\\system\\CurrentControlSet\\Services\\TcpIp\\Parameters\\Interfaces").
@@ -39,7 +38,7 @@ get_nameservers() ->
 
 is_good_ns(Addr) ->
     element(1,
-	    inet_res:nnslookup("a.root-servers.net", in, any, [{Addr,53}],
+	    inet_res:nnslookup("a.root-servers.net", in, a, [{Addr,53}],
 			       timer:seconds(5)
 			      )
 	   ) =:= ok.

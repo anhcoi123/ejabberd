@@ -5,7 +5,7 @@
 %%% Created : 26 Jul 2014 by Christophe Romain <christophe.romain@process-one.net>
 %%%
 %%%
-%%% ejabberd, Copyright (C) 2002-2015   ProcessOne
+%%% ejabberd, Copyright (C) 2002-2022   ProcessOne
 %%%
 %%% This program is free software; you can redistribute it and/or
 %%% modify it under the terms of the GNU General Public License as
@@ -17,99 +17,22 @@
 %%% MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
 %%% General Public License for more details.
 %%%
-%%% You should have received a copy of the GNU General Public License
-%%% along with this program; if not, write to the Free Software
-%%% Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA
-%%% 02111-1307 USA
+%%% You should have received a copy of the GNU General Public License along
+%%% with this program; if not, write to the Free Software Foundation, Inc.,
+%%% 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 %%%
 %%%----------------------------------------------------------------------
 
 -module(pubsub_migrate).
-
+-dialyzer({no_return, report_and_stop/2}).
 -include("pubsub.hrl").
 -include("logger.hrl").
 
--export([update_node_database/2, update_state_database/2, update_lastitem_database/2]).
+-export([update_node_database/2, update_state_database/2]).
+-export([update_item_database/2, update_lastitem_database/2]).
 
-update_item_database_binary() ->
-    F = fun () ->
-		case catch mnesia:read({pubsub_last_item, mnesia:first(pubsub_last_item)}) of
-		    [First] when is_list(First#pubsub_last_item.itemid) ->
-			?INFO_MSG("Binarization of pubsub items table...", []),
-			lists:foreach(fun (Id) ->
-					      [Node] = mnesia:read({pubsub_last_item, Id}),
-
-					      ItemId = iolist_to_binary(Node#pubsub_last_item.itemid),
-
-					      ok = mnesia:delete({pubsub_last_item, Id}),
-					      ok = mnesia:write(Node#pubsub_last_item{itemid=ItemId})
-				      end,
-				      mnesia:all_keys(pubsub_last_item));
-		    _-> no_need
-		end
-	end,
-    case mnesia:transaction(F) of
-	{aborted, Reason} ->
-	    ?ERROR_MSG("Failed to binarize pubsub items table: ~p", [Reason]);
-	{atomic, no_need} ->
-	    ok;
-	{atomic, Result} ->
-	    ?INFO_MSG("Pubsub items table has been binarized: ~p", [Result])
-    end.
-
-
-update_node_database_binary() ->
-    F = fun () ->
-		case catch mnesia:read({pubsub_node, mnesia:first(pubsub_node)}) of
-		    [First] when is_list(First#pubsub_node.type) ->
-			?INFO_MSG("Binarization of pubsub nodes table...", []),
-			lists:foreach(fun ({H, N}) ->
-					      [Node] = mnesia:read({pubsub_node, {H, N}}),
-
-					      Type = iolist_to_binary(Node#pubsub_node.type),
-					      BN = case N of
-						       Binary when is_binary(Binary) ->
-							   N;
-						       _ ->
-							   {result, BN1} = mod_pubsub:node_call(H, Type, path_to_node, [N]),
-							   BN1
-						   end,
-					      BP = case [case P of
-							     Binary2 when is_binary(Binary2) -> P;
-							     _ -> element(2, mod_pubsub:node_call(H, Type, path_to_node, [P]))
-							 end
-							 || P <- Node#pubsub_node.parents] of
-						       [<<>>] -> [];
-						       Parents -> Parents
-						   end,
-
-					      BH = case H of
-						       {U, S, R} -> {iolist_to_binary(U), iolist_to_binary(S), iolist_to_binary(R)};
-						       String -> iolist_to_binary(String)
-						   end,
-
-					      Owners = [{iolist_to_binary(U), iolist_to_binary(S), iolist_to_binary(R)} ||
-							   {U, S, R} <- Node#pubsub_node.owners],
-
-					      ok = mnesia:delete({pubsub_node, {H, N}}),
-					      ok = mnesia:write(Node#pubsub_node{nodeid = {BH, BN},
-									    parents = BP,
-									    type = Type,
-									    owners = Owners});
-					  (_) -> ok
-				      end,
-				      mnesia:all_keys(pubsub_node));
-		    _-> no_need
-		end
-	end,
-    case mnesia:transaction(F) of
-	{aborted, Reason} ->
-	    ?ERROR_MSG("Failed to binarize pubsub node table: ~p", [Reason]);
-	{atomic, no_need} ->
-	    ok;
-	{atomic, Result} ->
-	    ?INFO_MSG("Pubsub nodes table has been binarized: ~p", [Result])
-    end.
+update_item_database(_Host, _ServerHost) ->
+    convert_list_items().
 
 update_node_database(Host, ServerHost) ->
     mnesia:del_table_index(pubsub_node, type),
@@ -136,7 +59,7 @@ update_node_database(Host, ServerHost) ->
 											{unknown,
 											 Publisher},
 										    M =
-											{now(),
+											{erlang:timestamp(),
 											 Publisher},
 										    mnesia:write(#pubsub_item{itemid
 														  =
@@ -232,7 +155,7 @@ update_node_database(Host, ServerHost) ->
 	      end,
 	  {atomic, NewRecords} = mnesia:transaction(F),
 	  {atomic, ok} = mnesia:delete_table(pubsub_node),
-	  {atomic, ok} = mnesia:create_table(pubsub_node,
+	  {atomic, ok} = ejabberd_mnesia:create(?MODULE, pubsub_node,
 					     [{disc_copies, [node()]},
 					      {attributes,
 					       record_info(fields,
@@ -365,7 +288,7 @@ update_node_database(Host, ServerHost) ->
 	  rename_default_nodeplugin();
       _ -> ok
     end,
-    update_node_database_binary().
+    convert_list_nodes().
 
 rename_default_nodeplugin() ->
     lists:foreach(fun (Node) ->
@@ -377,46 +300,233 @@ rename_default_nodeplugin() ->
 							 _ = '_'})).
 
 update_state_database(_Host, _ServerHost) ->
-    case catch mnesia:table_info(pubsub_state, attributes) of
-	[stateid, nodeidx, items, affiliation, subscriptions] ->
-	    ?INFO_MSG("Upgrading pubsub states table...", []),
-	    F = fun ({pubsub_state, {{U,S,R}, NodeID}, _NodeIdx, Items, Aff, Sub}, Acc) ->
-			JID = {iolist_to_binary(U), iolist_to_binary(S), iolist_to_binary(R)},
-			Subs = case Sub of
-				   none ->
-				       [];
-				   [] ->
-				       [];
-				   _ ->
-				       {result, SubID} = pubsub_subscription:subscribe_node(JID, NodeID, []),
-				       [{Sub, SubID}]
-			       end,
-			NewState = #pubsub_state{stateid       = {JID, NodeID},
-						 items	 = Items,
-						 affiliation   = Aff,
-						 subscriptions = Subs},
-			[NewState | Acc]
-		end,
-	    {atomic, NewRecs} = mnesia:transaction(fun mnesia:foldl/3,
-						   [F, [], pubsub_state]),
-	    {atomic, ok} = mnesia:delete_table(pubsub_state),
-	    {atomic, ok} = mnesia:create_table(pubsub_state,
-					       [{disc_copies, [node()]},
-						{attributes, record_info(fields, pubsub_state)}]),
-	    FNew = fun () ->
-			   lists:foreach(fun mnesia:write/1, NewRecs)
-		   end,
-	    case mnesia:transaction(FNew) of
-		{atomic, Result} ->
-		    ?INFO_MSG("Pubsub states table upgraded: ~p",
-			      [Result]);
-		{aborted, Reason} ->
-		    ?ERROR_MSG("Problem upgrading Pubsub states table:~n~p",
-			       [Reason])
-	    end;
-	_ ->
-	    ok
-    end.
+% useless starting from ejabberd 17.04
+%    case catch mnesia:table_info(pubsub_state, attributes) of
+%	[stateid, nodeidx, items, affiliation, subscriptions] ->
+%	    ?INFO_MSG("Upgrading pubsub states table...", []),
+%	    F = fun ({pubsub_state, {{U,S,R}, NodeID}, _NodeIdx, Items, Aff, Sub}, Acc) ->
+%			JID = {U,S,R},
+%			Subs = case Sub of
+%				   none ->
+%				       [];
+%				   [] ->
+%				       [];
+%				   _ ->
+%				       SubID = pubsub_subscription:make_subid(),
+%				       [{Sub, SubID}]
+%			       end,
+%			NewState = #pubsub_state{stateid       = {JID, NodeID},
+%						 items	 = Items,
+%						 affiliation   = Aff,
+%						 subscriptions = Subs},
+%			[NewState | Acc]
+%		end,
+%	    {atomic, NewRecs} = mnesia:transaction(fun mnesia:foldl/3,
+%						   [F, [], pubsub_state]),
+%	    {atomic, ok} = mnesia:delete_table(pubsub_state),
+%	    {atomic, ok} = ejabberd_mnesia:create(?MODULE, pubsub_state,
+%					       [{disc_copies, [node()]},
+%						{attributes, record_info(fields, pubsub_state)}]),
+%	    FNew = fun () ->
+%			   lists:foreach(fun mnesia:write/1, NewRecs)
+%		   end,
+%	    case mnesia:transaction(FNew) of
+%		{atomic, Result} ->
+%		    ?INFO_MSG("Pubsub states table upgraded: ~p",
+%			      [Result]);
+%		{aborted, Reason} ->
+%		    ?ERROR_MSG("Problem upgrading Pubsub states table:~n~p",
+%			       [Reason])
+%	    end;
+%	_ ->
+%	    ok
+%    end,
+    convert_list_subscriptions(),
+    convert_list_states().
 
 update_lastitem_database(_Host, _ServerHost) ->
-    update_item_database_binary().
+    convert_list_lasts().
+
+%% binarization from old 2.1.x
+
+convert_list_items() ->
+    convert_list_records(
+	pubsub_item,
+	record_info(fields, pubsub_item),
+	fun(#pubsub_item{itemid = {I, _}}) -> I end,
+	fun(#pubsub_item{itemid = {I, Nidx},
+			 creation = {C, CKey},
+			 modification = {M, MKey},
+			 payload = Els} = R) ->
+	    R#pubsub_item{itemid = {bin(I), Nidx},
+			  creation = {C, binusr(CKey)},
+			  modification = {M, binusr(MKey)},
+			  payload = [fxml:to_xmlel(El) || El<-Els]}
+	end).
+
+convert_list_states() ->
+    convert_list_records(
+	pubsub_state,
+	record_info(fields, pubsub_state),
+	fun(#pubsub_state{stateid = {{U,_,_}, _}}) -> U end,
+	fun(#pubsub_state{stateid = {U, Nidx},
+			  items = Is,
+			  affiliation = A,
+			  subscriptions = Ss} = R) ->
+	    R#pubsub_state{stateid = {binusr(U), Nidx},
+			  items = [bin(I) || I<-Is],
+			  affiliation = A,
+			  subscriptions = [{S,bin(Sid)} || {S,Sid}<-Ss]}
+	end).
+
+convert_list_nodes() ->
+    convert_list_records(
+	pubsub_node,
+	record_info(fields, pubsub_node),
+	fun(#pubsub_node{nodeid = {{U,_,_}, _}}) -> U;
+	   (#pubsub_node{nodeid = {H, _}}) -> H end,
+	fun(#pubsub_node{nodeid = {H, N},
+			 id = I,
+			 parents = Ps,
+			 type = T,
+			 owners = Os,
+			 options = Opts} = R) ->
+	    R#pubsub_node{nodeid = {binhost(H), bin(N)},
+			  id = I,
+			  parents = [bin(P) || P<-Ps],
+			  type = bin(T),
+			  owners = [binusr(O) || O<-Os],
+			  options = Opts}
+	end).
+
+convert_list_subscriptions() ->
+    [convert_list_records(
+	pubsub_subscription,
+	record_info(fields, pubsub_subscription),
+	fun(#pubsub_subscription{subid = I}) -> I end,
+	fun(#pubsub_subscription{subid = I,
+				 options = Opts} = R) ->
+	    R#pubsub_subscription{subid = bin(I),
+				  options = Opts}
+	end) || lists:member(pubsub_subscription, mnesia:system_info(tables))].
+
+convert_list_lasts() ->
+    convert_list_records(
+	pubsub_last_item,
+	record_info(fields, pubsub_last_item),
+	fun(#pubsub_last_item{itemid = I}) -> I end,
+	fun(#pubsub_last_item{itemid = I,
+			      nodeid = Nidx,
+			      creation = {C, CKey},
+			      payload = Payload} = R) ->
+	    R#pubsub_last_item{itemid = bin(I),
+			       nodeid = Nidx,
+			       creation = {C, binusr(CKey)},
+			       payload = fxml:to_xmlel(Payload)}
+	end).
+
+%% internal tools
+
+convert_list_records(Tab, Fields, DetectFun, ConvertFun) ->
+    case mnesia:table_info(Tab, attributes) of
+	Fields ->
+	    convert_table_to_binary(
+	      Tab, Fields, set, DetectFun, ConvertFun);
+	_ ->
+	    ?INFO_MSG("Recreating ~p table", [Tab]),
+	    mnesia:transform_table(Tab, ignore, Fields),
+	    convert_list_records(Tab, Fields, DetectFun, ConvertFun)
+    end.
+
+binhost({U,S,R}) -> binusr({U,S,R});
+binhost(L) -> bin(L).
+
+binusr({U,S,R}) -> {bin(U), bin(S), bin(R)}.
+
+bin(L) -> iolist_to_binary(L).
+
+%% The code should be updated to support new ejabberd_mnesia
+%% transform functions (i.e. need_transform/1 and transform/1)
+convert_table_to_binary(Tab, Fields, Type, DetectFun, ConvertFun) ->
+    case is_table_still_list(Tab, DetectFun) of
+        true ->
+            ?INFO_MSG("Converting '~ts' table from strings to binaries.", [Tab]),
+            TmpTab = list_to_atom(atom_to_list(Tab) ++ "_tmp_table"),
+            catch mnesia:delete_table(TmpTab),
+            case ejabberd_mnesia:create(?MODULE, TmpTab,
+                                     [{disc_only_copies, [node()]},
+                                      {type, Type},
+                                      {local_content, true},
+                                      {record_name, Tab},
+                                      {attributes, Fields}]) of
+                {atomic, ok} ->
+                    mnesia:transform_table(Tab, ignore, Fields),
+                    case mnesia:transaction(
+                           fun() ->
+                                   mnesia:write_lock_table(TmpTab),
+                                   mnesia:foldl(
+                                     fun(R, _) ->
+                                             NewR = ConvertFun(R),
+                                             mnesia:dirty_write(TmpTab, NewR)
+                                     end, ok, Tab)
+                           end) of
+                        {atomic, ok} ->
+                            mnesia:clear_table(Tab),
+                            case mnesia:transaction(
+                                   fun() ->
+                                           mnesia:write_lock_table(Tab),
+                                           mnesia:foldl(
+                                             fun(R, _) ->
+                                                     mnesia:dirty_write(R)
+                                             end, ok, TmpTab)
+                                   end) of
+                                {atomic, ok} ->
+                                    mnesia:delete_table(TmpTab);
+                                Err ->
+                                    report_and_stop(Tab, Err)
+                            end;
+                        Err ->
+                            report_and_stop(Tab, Err)
+                    end;
+                Err ->
+                    report_and_stop(Tab, Err)
+            end;
+        false ->
+            ok
+    end.
+
+is_table_still_list(Tab, DetectFun) ->
+    is_table_still_list(Tab, DetectFun, mnesia:dirty_first(Tab)).
+
+is_table_still_list(_Tab, _DetectFun, '$end_of_table') ->
+    false;
+is_table_still_list(Tab, DetectFun, Key) ->
+    Rs = mnesia:dirty_read(Tab, Key),
+    Res = lists:foldl(fun(_, true) ->
+                              true;
+                         (_, false) ->
+                              false;
+                         (R, _) ->
+                              case DetectFun(R) of
+                                  '$next' ->
+                                      '$next';
+                                  El ->
+                                      is_list(El)
+                              end
+                      end, '$next', Rs),
+    case Res of
+        true ->
+            true;
+        false ->
+            false;
+        '$next' ->
+            is_table_still_list(Tab, DetectFun, mnesia:dirty_next(Tab, Key))
+    end.
+
+report_and_stop(Tab, Err) ->
+    ErrTxt = lists:flatten(
+               io_lib:format(
+                 "Failed to convert '~ts' table to binary: ~p",
+                 [Tab, Err])),
+    ?CRITICAL_MSG(ErrTxt, []),
+    ejabberd:halt().

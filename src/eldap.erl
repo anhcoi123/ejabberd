@@ -6,7 +6,7 @@
 %%%           draft-ietf-asid-ldap-c-api-00.txt
 %%%
 %%% Copyright (C) 2000  Torbjorn Tornkvist, tnt@home.se
-%%% 
+%%%
 %%%
 %%% This program is free software; you can redistribute it and/or modify
 %%% it under the terms of the GNU General Public License as published by
@@ -63,9 +63,8 @@
 %%%     active_bind - sent bind() request and waiting for response
 %%%----------------------------------------------------------------------
 
--behaviour(gen_fsm).
+-behaviour(p1_fsm).
 
--include("ejabberd.hrl").
 -include("logger.hrl").
 
 %% External exports
@@ -80,7 +79,6 @@
 
 -export([get_status/1]).
 
-%% gen_fsm callbacks
 -export([init/1, connecting/2, connecting/3,
 	 wait_bind_response/3, active/3, active_bind/3,
 	 handle_event/3, handle_sync_event/4, handle_info/3,
@@ -89,7 +87,7 @@
 -export_type([filter/0]).
 
 -include("ELDAPv3.hrl").
-
+-include_lib("kernel/include/inet.hrl").
 -include("eldap.hrl").
 
 -define(LDAP_VERSION, 3).
@@ -127,36 +125,38 @@
 -record(eldap,
 	{version = ?LDAP_VERSION :: non_neg_integer(),
          hosts = []              :: [binary()],
-         host                    :: binary(),
+         host = undefined        :: binary() | undefined,
 	 port = 389              :: inet:port_number(),
          sockmod = gen_tcp       :: ssl | gen_tcp,
          tls = none              :: none | tls,
-         tls_options = []        :: [{cacertfile, string()} |
+         tls_options = []        :: [{certfile, string()} |
+				     {cacertfile, string()} |
                                      {depth, non_neg_integer()} |
-                                     {verify, non_neg_integer()}],
-	 fd,
+                                     {verify, non_neg_integer()} |
+                                     {fail_if_no_peer_cert, boolean()}],
+	 fd                      :: gen_tcp:socket() | undefined,
          rootdn = <<"">>         :: binary(),
          passwd = <<"">>         :: binary(),
          id = 0                  :: non_neg_integer(),
          bind_timer = make_ref() :: reference(),
-	 dict = dict:new()       :: ?TDICT,
-         req_q = queue:new()     :: ?TQUEUE}).
+	 dict = dict:new()       :: dict:dict(),
+         req_q = queue:new()     :: queue:queue()}).
 
 %%%----------------------------------------------------------------------
 %%% API
 %%%----------------------------------------------------------------------
 start_link(Name) ->
-    Reg_name = jlib:binary_to_atom(<<"eldap_",
+    Reg_name = misc:binary_to_atom(<<"eldap_",
 				       Name/binary>>),
-    gen_fsm:start_link({local, Reg_name}, ?MODULE, [], []).
+    p1_fsm:start_link({local, Reg_name}, ?MODULE, [], []).
 
 -spec start_link(binary(), [binary()], inet:port_number(), binary(),
                  binary(), tlsopts()) -> any().
 
 start_link(Name, Hosts, Port, Rootdn, Passwd, Opts) ->
-    Reg_name = jlib:binary_to_atom(<<"eldap_",
+    Reg_name = misc:binary_to_atom(<<"eldap_",
 				       Name/binary>>),
-    gen_fsm:start_link({local, Reg_name}, ?MODULE,
+    p1_fsm:start_link({local, Reg_name}, ?MODULE,
 		       [Hosts, Port, Rootdn, Passwd, Opts], []).
 
 -spec get_status(handle()) -> any().
@@ -166,7 +166,7 @@ start_link(Name, Hosts, Port, Rootdn, Passwd, Opts) ->
 %%% --------------------------------------------------------------------
 get_status(Handle) ->
     Handle1 = get_handle(Handle),
-    gen_fsm:sync_send_all_state_event(Handle1, get_status).
+    p1_fsm:sync_send_all_state_event(Handle1, get_status).
 
 %%% --------------------------------------------------------------------
 %%% Shutdown connection (and process) asynchronous.
@@ -175,14 +175,14 @@ get_status(Handle) ->
 
 close(Handle) ->
     Handle1 = get_handle(Handle),
-    gen_fsm:send_all_state_event(Handle1, close).
+    p1_fsm:send_all_state_event(Handle1, close).
 
 %%% --------------------------------------------------------------------
 %%% Add an entry. The entry field MUST NOT exist for the AddRequest
 %%% to succeed. The parent of the entry MUST exist.
 %%% Example:
 %%%
-%%%  add(Handle, 
+%%%  add(Handle,
 %%%         "cn=Bill Valentine, ou=people, o=Bluetail AB, dc=bluetail, dc=com",
 %%%         [{"objectclass", ["person"]},
 %%%          {"cn", ["Bill Valentine"]},
@@ -192,7 +192,7 @@ close(Handle) ->
 %%% --------------------------------------------------------------------
 add(Handle, Entry, Attributes) ->
     Handle1 = get_handle(Handle),
-    gen_fsm:sync_send_event(Handle1,
+    p1_fsm:sync_send_event(Handle1,
 			    {add, Entry, add_attrs(Attributes)}, ?CALL_TIMEOUT).
 
 %%% Do sanity check !
@@ -206,17 +206,17 @@ add_attrs(Attrs) ->
     end.
 
 %%% --------------------------------------------------------------------
-%%% Delete an entry. The entry consists of the DN of 
+%%% Delete an entry. The entry consists of the DN of
 %%% the entry to be deleted.
 %%% Example:
 %%%
-%%%  delete(Handle, 
+%%%  delete(Handle,
 %%%         "cn=Bill Valentine, ou=people, o=Bluetail AB, dc=bluetail, dc=com"
 %%%        )
 %%% --------------------------------------------------------------------
 delete(Handle, Entry) ->
     Handle1 = get_handle(Handle),
-    gen_fsm:sync_send_event(Handle1, {delete, Entry},
+    p1_fsm:sync_send_event(Handle1, {delete, Entry},
 			    ?CALL_TIMEOUT).
 
 %%% --------------------------------------------------------------------
@@ -224,21 +224,21 @@ delete(Handle, Entry) ->
 %%% operations can be performed as one atomic operation.
 %%% Example:
 %%%
-%%%  modify(Handle, 
+%%%  modify(Handle,
 %%%         "cn=Torbjorn Tornkvist, ou=people, o=Bluetail AB, dc=bluetail, dc=com",
 %%%         [replace("telephoneNumber", ["555 555 00"]),
-%%%          add("description", ["LDAP hacker"])] 
+%%%          add("description", ["LDAP hacker"])]
 %%%        )
 %%% --------------------------------------------------------------------
 -spec modify(handle(), any(), [add | delete | replace]) -> any().
 
 modify(Handle, Object, Mods) ->
     Handle1 = get_handle(Handle),
-    gen_fsm:sync_send_event(Handle1, {modify, Object, Mods},
+    p1_fsm:sync_send_event(Handle1, {modify, Object, Mods},
 			    ?CALL_TIMEOUT).
 
 %%%
-%%% Modification operations. 
+%%% Modification operations.
 %%% Example:
 %%%            replace("telephoneNumber", ["555 555 00"])
 %%%
@@ -253,7 +253,7 @@ mod_delete(Type, Values) ->
 %%% operations can be performed as one atomic operation.
 %%% Example:
 %%%
-%%%  modify_dn(Handle, 
+%%%  modify_dn(Handle,
 %%%    "cn=Bill Valentine, ou=people, o=Bluetail AB, dc=bluetail, dc=com",
 %%%    "cn=Ben Emerson",
 %%%    true,
@@ -274,7 +274,7 @@ m(Operation, Type, Values) ->
 
 modify_dn(Handle, Entry, NewRDN, DelOldRDN, NewSup) ->
     Handle1 = get_handle(Handle),
-    gen_fsm:sync_send_event(Handle1,
+    p1_fsm:sync_send_event(Handle1,
 			    {modify_dn, Entry, NewRDN, bool_p(DelOldRDN),
 			     optional(NewSup)},
 			    ?CALL_TIMEOUT).
@@ -283,22 +283,22 @@ modify_dn(Handle, Entry, NewRDN, DelOldRDN, NewSup) ->
 
 modify_passwd(Handle, DN, Passwd) ->
     Handle1 = get_handle(Handle),
-    gen_fsm:sync_send_event(Handle1,
+    p1_fsm:sync_send_event(Handle1,
 			    {modify_passwd, DN, Passwd}, ?CALL_TIMEOUT).
 
 %%% --------------------------------------------------------------------
 %%% Bind.
 %%% Example:
 %%%
-%%%  bind(Handle, 
+%%%  bind(Handle,
 %%%    "cn=Bill Valentine, ou=people, o=Bluetail AB, dc=bluetail, dc=com",
 %%%    "secret")
 %%% --------------------------------------------------------------------
 -spec bind(handle(), binary(), binary()) -> any().
- 
+
 bind(Handle, RootDN, Passwd) ->
     Handle1 = get_handle(Handle),
-    gen_fsm:sync_send_event(Handle1, {bind, RootDN, Passwd},
+    p1_fsm:sync_send_event(Handle1, {bind, RootDN, Passwd},
 			    ?CALL_TIMEOUT).
 
 %%% Sanity checks !
@@ -309,7 +309,7 @@ optional([]) -> asn1_NOVALUE;
 optional(Value) -> Value.
 
 %%% --------------------------------------------------------------------
-%%% Synchronous search of the Directory returning a 
+%%% Synchronous search of the Directory returning a
 %%% requested set of attributes.
 %%%
 %%%  Example:
@@ -356,7 +356,7 @@ search(Handle, L) when is_list(L) ->
 
 call_search(Handle, A) ->
     Handle1 = get_handle(Handle),
-    gen_fsm:sync_send_event(Handle1, {search, A},
+    p1_fsm:sync_send_event(Handle1, {search, A},
 			    ?CALL_TIMEOUT).
 
 -spec parse_search_args(search_args()) -> eldap_search().
@@ -549,7 +549,7 @@ extensibleMatch_opts([], MRA) -> MRA.
 get_handle(Pid) when is_pid(Pid) -> Pid;
 get_handle(Atom) when is_atom(Atom) -> Atom;
 get_handle(Name) when is_binary(Name) ->
-    jlib:binary_to_atom(<<"eldap_",
+    misc:binary_to_atom(<<"eldap_",
 			    Name/binary>>).
 
 %%%----------------------------------------------------------------------
@@ -561,16 +561,12 @@ get_handle(Name) when is_binary(Name) ->
 %% Returns: {ok, StateName, StateData}          |
 %%          {ok, StateName, StateData, Timeout} |
 %%          ignore                              |
-%%          {stop, StopReason}             
+%%          {stop, StopReason}
 %% I use the trick of setting a timeout of 0 to pass control into the
-%% process.      
+%% process.
 %%----------------------------------------------------------------------
 init([Hosts, Port, Rootdn, Passwd, Opts]) ->
-    Encrypt = case gen_mod:get_opt(encrypt, Opts,
-                                   fun(tls) -> tls;
-                                      (starttls) -> starttls;
-                                      (none) -> none
-                                   end) of
+    Encrypt = case proplists:get_value(encrypt, Opts) of
                   tls -> tls;
                   _ -> none
 	      end,
@@ -582,46 +578,36 @@ init([Hosts, Port, Rootdn, Passwd, Opts]) ->
 		     end;
 		 PT -> PT
 	       end,
-    CacertOpts = case gen_mod:get_opt(
-                        tls_cacertfile, Opts,
-                        fun(S) when is_binary(S) ->
-                                binary_to_list(S);
-                           (undefined) ->
-                                undefined
-                        end) of
+    CertOpts = case proplists:get_value(tls_certfile, Opts) of
+		   undefined ->
+		       [];
+		   Path1 ->
+		       [{certfile, Path1}]
+	       end,
+    CacertOpts = case proplists:get_value(tls_cacertfile, Opts) of
                      undefined ->
                          [];
-                     Path ->
-                         [{cacertfile, Path}]
+                     Path2 ->
+                         [{cacertfile, Path2}]
                  end,
-    DepthOpts = case gen_mod:get_opt(
-                       tls_depth, Opts,
-                       fun(I) when is_integer(I), I>=0 ->
-                               I;
-                          (undefined) ->
-                               undefined
-                       end) of
+    DepthOpts = case proplists:get_value(tls_depth, Opts) of
                     undefined ->
                         [];
                     Depth ->
                         [{depth, Depth}]
                 end,
-    Verify = gen_mod:get_opt(tls_verify, Opts,
-                             fun(hard) -> hard;
-                                (soft) -> soft;
-                                (false) -> false
-                             end, false),
+    Verify = proplists:get_value(tls_verify, Opts, false),
     TLSOpts = if (Verify == hard orelse Verify == soft)
 		   andalso CacertOpts == [] ->
 		     ?WARNING_MSG("TLS verification is enabled but no CA "
 				  "certfiles configured, so verification "
 				  "is disabled.",
 				  []),
-		     [];
+		     CertOpts;
 		 Verify == soft ->
-		     [{verify, 1}] ++ CacertOpts ++ DepthOpts;
+		     [{verify, verify_peer}, {fail_if_no_peer_cert, false}] ++ CertOpts ++ CacertOpts ++ DepthOpts;
 		 Verify == hard ->
-		     [{verify, 2}] ++ CacertOpts ++ DepthOpts;
+		     [{verify, verify_peer}, {fail_if_no_peer_cert, true}] ++ CertOpts ++ CacertOpts ++ DepthOpts;
 		 true -> []
 	      end,
     {ok, connecting,
@@ -630,27 +616,10 @@ init([Hosts, Port, Rootdn, Passwd, Opts]) ->
 	    id = 0, dict = dict:new(), req_q = queue:new()},
      0}.
 
-%%----------------------------------------------------------------------
-%% Func: StateName/2
-%% Called when gen_fsm:send_event/2,3 is invoked (async)
-%% Returns: {next_state, NextStateName, NextStateData}          |
-%%          {next_state, NextStateName, NextStateData, Timeout} |
-%%          {stop, Reason, NewStateData}                         
-%%----------------------------------------------------------------------
 connecting(timeout, S) ->
     {ok, NextState, NewS} = connect_bind(S),
     {next_state, NextState, NewS}.
 
-%%----------------------------------------------------------------------
-%% Func: StateName/3
-%% Called when gen_fsm:sync_send_event/2,3 is invoked.
-%% Returns: {next_state, NextStateName, NextStateData}            |
-%%          {next_state, NextStateName, NextStateData, Timeout}   |
-%%          {reply, Reply, NextStateName, NextStateData}          |
-%%          {reply, Reply, NextStateName, NextStateData, Timeout} |
-%%          {stop, Reason, NewStateData}                          |
-%%          {stop, Reason, Reply, NewStateData}                    
-%%----------------------------------------------------------------------
 connecting(Event, From, S) ->
     Q = queue:in({Event, From}, S#eldap.req_q),
     {next_state, connecting, S#eldap{req_q = Q}}.
@@ -668,10 +637,10 @@ active(Event, From, S) ->
 
 %%----------------------------------------------------------------------
 %% Func: handle_event/3
-%% Called when gen_fsm:send_all_state_event/2 is invoked.
+%% Called when p1_fsm:send_all_state_event/2 is invoked.
 %% Returns: {next_state, NextStateName, NextStateData}          |
 %%          {next_state, NextStateName, NextStateData, Timeout} |
-%%          {stop, Reason, NewStateData}                         
+%%          {stop, Reason, NewStateData}
 %%----------------------------------------------------------------------
 handle_event(close, _StateName, S) ->
     catch (S#eldap.sockmod):close(S#eldap.fd),
@@ -679,38 +648,19 @@ handle_event(close, _StateName, S) ->
 handle_event(_Event, StateName, S) ->
     {next_state, StateName, S}.
 
-%%----------------------------------------------------------------------
-%% Func: handle_sync_event/4
-%% Called when gen_fsm:sync_send_all_state_event/2,3 is invoked
-%% Returns: {next_state, NextStateName, NextStateData}            |
-%%          {next_state, NextStateName, NextStateData, Timeout}   |
-%%          {reply, Reply, NextStateName, NextStateData}          |
-%%          {reply, Reply, NextStateName, NextStateData, Timeout} |
-%%          {stop, Reason, NewStateData}                          |
-%%          {stop, Reason, Reply, NewStateData}                    
-%%----------------------------------------------------------------------
 handle_sync_event(_Event, _From, StateName, S) ->
     {reply, {StateName, S}, StateName, S}.
-
-%%----------------------------------------------------------------------
-%% Func: handle_info/3
-%% Returns: {next_state, NextStateName, NextStateData}          |
-%%          {next_state, NextStateName, NextStateData, Timeout} |
-%%          {stop, Reason, NewStateData}                         
-%%          {stop, Reason, NewStateData}
-%%----------------------------------------------------------------------
 
 %%
 %% Packets arriving in various states
 %%
 handle_info({Tag, _Socket, Data}, connecting, S)
     when Tag == tcp; Tag == ssl ->
-    ?DEBUG("tcp packet received when disconnected!~n~p",
-	   [Data]),
+    ?DEBUG("TCP packet received when disconnected!~n~p", [Data]),
     {next_state, connecting, S};
 handle_info({Tag, _Socket, Data}, wait_bind_response, S)
     when Tag == tcp; Tag == ssl ->
-    cancel_timer(S#eldap.bind_timer),
+    misc:cancel_timer(S#eldap.bind_timer),
     case catch recvd_wait_bind_response(Data, S) of
       bound -> dequeue_commands(S);
       {fail_bind, Reason} ->
@@ -725,13 +675,12 @@ handle_info({Tag, _Socket, Data}, wait_bind_response, S)
 	  {next_state, connecting, close_and_retry(S)}
     end;
 handle_info({Tag, _Socket, Data}, StateName, S)
-    when (StateName == active orelse
-	    StateName == active_bind)
+    when (StateName == active orelse StateName == active_bind)
 	   andalso (Tag == tcp orelse Tag == ssl) ->
     case catch recvd_packet(Data, S) of
       {response, Response, RequestType} ->
 	  NewS = case Response of
-		   {reply, Reply, To, S1} -> gen_fsm:reply(To, Reply), S1;
+		   {reply, Reply, To, S1} -> p1_fsm:reply(To, Reply), S1;
 		   {ok, S1} -> S1
 		 end,
 	  if StateName == active_bind andalso
@@ -744,7 +693,7 @@ handle_info({Tag, _Socket, Data}, StateName, S)
     end;
 handle_info({Tag, _Socket}, Fsm_state, S)
     when Tag == tcp_closed; Tag == ssl_closed ->
-    ?WARNING_MSG("LDAP server closed the connection: ~s:~p~nIn "
+    ?WARNING_MSG("LDAP server closed the connection: ~ts:~p~nIn "
 		 "State: ~p",
 		 [S#eldap.host, S#eldap.port, Fsm_state]),
     {next_state, connecting, close_and_retry(S)};
@@ -760,21 +709,20 @@ handle_info({timeout, Timer, {cmd_timeout, Id}},
 	    StateName, S) ->
     case cmd_timeout(Timer, Id, S) of
       {reply, To, Reason, NewS} ->
-	  gen_fsm:reply(To, Reason),
+	  p1_fsm:reply(To, Reason),
 	  {next_state, StateName, NewS};
       {error, _Reason} -> {next_state, StateName, S}
     end;
 handle_info({timeout, retry_connect}, connecting, S) ->
     {ok, NextState, NewS} = connect_bind(S),
     {next_state, NextState, NewS};
-handle_info({timeout, _Timer, bind_timeout},
-	    wait_bind_response, S) ->
+handle_info({timeout, _Timer, bind_timeout}, wait_bind_response, S) ->
     {next_state, connecting, close_and_retry(S)};
 %%
 %% Make sure we don't fill the message queue with rubbish
 %%
 handle_info(Info, StateName, S) ->
-    ?DEBUG("eldap. Unexpected Info: ~p~nIn state: "
+    ?DEBUG("Unexpected Info: ~p~nIn state: "
 	   "~p~n when StateData is: ~p",
 	   [Info, StateName, S]),
     {next_state, StateName, S}.
@@ -825,17 +773,15 @@ send_command(Command, From, S) ->
     {Name, Request} = gen_req(Command),
     Message = #'LDAPMessage'{messageID = Id,
 			     protocolOp = {Name, Request}},
-    ?DEBUG("~p~n", [{Name, Request}]),
-    {ok, Bytes} = 'ELDAPv3':encode('LDAPMessage',
-				Message),
+    ?DEBUG("~p~n", [{Name, ejabberd_config:may_hide_data(Request)}]),
+    {ok, Bytes} = 'ELDAPv3':encode('LDAPMessage', Message),
     case (S#eldap.sockmod):send(S#eldap.fd, Bytes) of
       ok ->
-	  Timer = erlang:start_timer(?CMD_TIMEOUT, self(),
-				     {cmd_timeout, Id}),
-	  New_dict = dict:store(Id,
-				[{Timer, Command, From, Name}], S#eldap.dict),
-	  {ok, S#eldap{id = Id, dict = New_dict}};
-      Error -> Error
+	Timer = erlang:start_timer(?CMD_TIMEOUT, self(), {cmd_timeout, Id}),
+	New_dict = dict:store(Id, [{Timer, Command, From, Name}], S#eldap.dict),
+	{ok, S#eldap{id = Id, dict = New_dict}};
+      Error ->
+	Error
     end.
 
 gen_req({search, A}) ->
@@ -877,7 +823,7 @@ gen_req({bind, RootDN, Passwd}) ->
 %% recvd_packet
 %% Deals with incoming packets in the active state
 %% Will return one of:
-%%  {ok, NewS} - Don't reply to client yet as this is part of a search 
+%%  {ok, NewS} - Don't reply to client yet as this is part of a search
 %%               result and we haven't got all the answers yet.
 %%  {reply, Result, From, NewS} - Reply with result to client From
 %%  {error, Reason}
@@ -902,14 +848,14 @@ recvd_packet(Pkt, S) ->
 			 if Reason == success; Reason == sizeLimitExceeded ->
 				{Res, Ref} = polish(Result_so_far),
 				New_dict = dict:erase(Id, Dict),
-				cancel_timer(Timer),
+				misc:cancel_timer(Timer),
 				{reply,
 				 #eldap_search_result{entries = Res,
 						      referrals = Ref},
 				 From, S#eldap{dict = New_dict}};
 			    true ->
 				New_dict = dict:erase(Id, Dict),
-				cancel_timer(Timer),
+				misc:cancel_timer(Timer),
 				{reply, {error, Reason}, From,
 				 S#eldap{dict = New_dict}}
 			 end;
@@ -918,37 +864,37 @@ recvd_packet(Pkt, S) ->
 			 {ok, S#eldap{dict = New_dict}};
 		     {addRequest, {addResponse, Result}} ->
 			 New_dict = dict:erase(Id, Dict),
-			 cancel_timer(Timer),
+			 misc:cancel_timer(Timer),
 			 Reply = check_reply(Result, From),
 			 {reply, Reply, From, S#eldap{dict = New_dict}};
 		     {delRequest, {delResponse, Result}} ->
 			 New_dict = dict:erase(Id, Dict),
-			 cancel_timer(Timer),
+			 misc:cancel_timer(Timer),
 			 Reply = check_reply(Result, From),
 			 {reply, Reply, From, S#eldap{dict = New_dict}};
 		     {modifyRequest, {modifyResponse, Result}} ->
 			 New_dict = dict:erase(Id, Dict),
-			 cancel_timer(Timer),
+			 misc:cancel_timer(Timer),
 			 Reply = check_reply(Result, From),
 			 {reply, Reply, From, S#eldap{dict = New_dict}};
 		     {modDNRequest, {modDNResponse, Result}} ->
 			 New_dict = dict:erase(Id, Dict),
-			 cancel_timer(Timer),
+			 misc:cancel_timer(Timer),
 			 Reply = check_reply(Result, From),
 			 {reply, Reply, From, S#eldap{dict = New_dict}};
 		     {bindRequest, {bindResponse, Result}} ->
 			 New_dict = dict:erase(Id, Dict),
-			 cancel_timer(Timer),
+			 misc:cancel_timer(Timer),
 			 Reply = check_bind_reply(Result, From),
 			 {reply, Reply, From, S#eldap{dict = New_dict}};
 		     {extendedReq, {extendedResp, Result}} ->
 			 New_dict = dict:erase(Id, Dict),
-			 cancel_timer(Timer),
+			 misc:cancel_timer(Timer),
 			 Reply = check_extended_reply(Result, From),
 			 {reply, Reply, From, S#eldap{dict = New_dict}};
 		     {OtherName, OtherResult} ->
 			 New_dict = dict:erase(Id, Dict),
-			 cancel_timer(Timer),
+			 misc:cancel_timer(Timer),
 			 {reply,
 			  {error, {invalid_result, OtherName, OtherResult}},
 			  From, S#eldap{dict = New_dict}}
@@ -1023,16 +969,11 @@ check_id(_, _) -> throw({error, wrong_bind_id}).
 %% General Helpers
 %%-----------------------------------------------------------------------
 
-cancel_timer(Timer) ->
-    erlang:cancel_timer(Timer),
-    receive {timeout, Timer, _} -> ok after 0 -> ok end.
-
-
 close_and_retry(S, Timeout) ->
     catch (S#eldap.sockmod):close(S#eldap.fd),
     Queue = dict:fold(fun (_Id,
 			   [{Timer, Command, From, _Name} | _], Q) ->
-			      cancel_timer(Timer),
+			      misc:cancel_timer(Timer),
 			      queue:in_r({Command, From}, Q);
 			  (_, _, Q) -> Q
 		      end,
@@ -1045,7 +986,7 @@ close_and_retry(S) ->
     close_and_retry(S, ?RETRY_TIMEOUT).
 
 report_bind_failure(Host, Port, Reason) ->
-    ?WARNING_MSG("LDAP bind failed on ~s:~p~nReason: ~p",
+    ?WARNING_MSG("LDAP bind failed on ~ts:~p~nReason: ~p",
 		 [Host, Port, Reason]).
 
 %%-----------------------------------------------------------------------
@@ -1095,31 +1036,45 @@ polish([H | T], Res,
     polish(T, Res, [H | Ref]);
 polish([], Res, Ref) -> {Res, Ref}.
 
+
+-ifdef(NO_CUSTOMIZE_HOSTNAME_CHECK).
+check_hostname_opt(TLSOpts) ->
+    TLSOpts.
+-else.
+check_hostname_opt(TLSOpts) ->
+    MatchFun = public_key:pkix_verify_hostname_match_fun(https),
+    [{customize_hostname_check, [{match_fun, MatchFun}]} | TLSOpts].
+-endif.
+
+host_tls_options(Host, TLSOpts) ->
+    case proplists:get_value(verify, TLSOpts) of
+        verify_peer ->
+            check_hostname_opt([{server_name_indication, Host} | TLSOpts]);
+         _ ->
+            TLSOpts
+    end.
+
 %%-----------------------------------------------------------------------
 %% Connect to next server in list and attempt to bind to it.
 %%-----------------------------------------------------------------------
 connect_bind(S) ->
     Host = next_host(S#eldap.host, S#eldap.hosts),
-    ?INFO_MSG("LDAP connection on ~s:~p",
-	      [Host, S#eldap.port]),
+    HostS = binary_to_list(Host),
     Opts = if S#eldap.tls == tls ->
 		  [{packet, asn1}, {active, true}, {keepalive, true},
 		   binary
-		   | S#eldap.tls_options];
+		   | host_tls_options(HostS, S#eldap.tls_options)];
 	      true ->
 		  [{packet, asn1}, {active, true}, {keepalive, true},
 		   {send_timeout, ?SEND_TIMEOUT}, binary]
 	   end,
-    HostS = binary_to_list(Host),
-    SocketData = case S#eldap.tls of
-		   tls ->
-		       SockMod = ssl, ssl:connect(HostS, S#eldap.port, Opts);
-		   %% starttls -> %% TODO: Implement STARTTLS;
-		   _ ->
-		       SockMod = gen_tcp,
-		       gen_tcp:connect(HostS, S#eldap.port, Opts)
-		 end,
-    case SocketData of
+    ?DEBUG("Connecting to LDAP server at ~ts:~p with options ~p",
+	   [Host, S#eldap.port, Opts]),
+    SockMod = case S#eldap.tls of
+		  tls -> ssl;
+		  _ -> gen_tcp
+	      end,
+    case connect(HostS, S#eldap.port, SockMod, Opts) of
       {ok, Socket} ->
 	  case bind_request(Socket, S#eldap{sockmod = SockMod}) of
 	    {ok, NewS} ->
@@ -1134,9 +1089,8 @@ connect_bind(S) ->
 		{ok, connecting, NewS#eldap{host = Host}}
 	  end;
       {error, Reason} ->
-	  ?ERROR_MSG("LDAP connection failed:~n** Server: "
-		     "~s:~p~n** Reason: ~p~n** Socket options: ~p",
-		     [Host, S#eldap.port, Reason, Opts]),
+	  ?ERROR_MSG("LDAP connection to ~ts:~b failed: ~ts",
+		     [Host, S#eldap.port, format_error(SockMod, Reason)]),
 	  NewS = close_and_retry(S),
 	  {ok, connecting, NewS#eldap{host = Host}}
     end.
@@ -1148,9 +1102,8 @@ bind_request(Socket, S) ->
 			 authentication = {simple, S#eldap.passwd}},
     Message = #'LDAPMessage'{messageID = Id,
 			     protocolOp = {bindRequest, Req}},
-    ?DEBUG("Bind Request Message:~p~n", [Message]),
-    {ok, Bytes} = 'ELDAPv3':encode('LDAPMessage',
-				Message),
+    ?DEBUG("Bind Request Message:~p~n", [ejabberd_config:may_hide_data(Message)]),
+    {ok, Bytes} = 'ELDAPv3':encode('LDAPMessage', Message),
     case (S#eldap.sockmod):send(Socket, Bytes) of
       ok -> {ok, S#eldap{id = Id}};
       Error -> Error
@@ -1163,24 +1116,6 @@ next_host(Host,
 	  Hosts) ->                       % Find next in turn
     next_host(Host, Hosts, Hosts).
 
-%%% --------------------------------------------------------------------
-%%% Verify the input data
-%%% --------------------------------------------------------------------
-%%% --------------------------------------------------------------------
-%%% Get and Validate the initial configuration
-%%% --------------------------------------------------------------------
-%% get_atom(Key, List) ->
-%%     case lists:keysearch(Key, 1, List) of
-%% 	{value, {Key, Value}} when is_atom(Value) ->
-%% 	    Value;
-%% 	{value, {Key, _Value}} ->
-%% 	    throw({error, "Bad Value in Config for " ++ atom_to_list(Key)});
-%% 	false ->
-%% 	    throw({error, "No Entry in Config for " ++ atom_to_list(Key)})
-%%     end.
-%%% --------------------------------------------------------------------
-%%% Other Stuff
-%%% --------------------------------------------------------------------
 next_host(Host, [Host], Hosts) ->
     hd(Hosts);    % Wrap back to first
 next_host(Host, [Host | Tail], _Hosts) ->
@@ -1194,3 +1129,78 @@ bump_id(#eldap{id = Id})
     when Id > (?MAX_TRANSACTION_ID) ->
     ?MIN_TRANSACTION_ID;
 bump_id(#eldap{id = Id}) -> Id + 1.
+
+format_error(SockMod, Reason) ->
+    Txt = case SockMod of
+	      ssl -> ssl:format_error(Reason);
+	      gen_tcp -> inet:format_error(Reason)
+	  end,
+    case Txt of
+	"unknown POSIX error" ->
+	    lists:flatten(io_lib:format("~p", [Reason]));
+	_ ->
+	    Txt
+    end.
+
+%%--------------------------------------------------------------------
+%% Connecting stuff
+%%--------------------------------------------------------------------
+-define(CONNECT_TIMEOUT, timer:seconds(15)).
+-define(DNS_TIMEOUT, timer:seconds(5)).
+
+connect(Host, Port, Mod, Opts) ->
+    case lookup(Host) of
+	{ok, AddrsFamilies} ->
+	    do_connect(AddrsFamilies, Port, Mod, Opts, {error, nxdomain});
+	{error, _} = Err ->
+	    Err
+    end.
+
+do_connect([{IP, Family}|AddrsFamilies], Port, Mod, Opts, _Err) ->
+    case Mod:connect(IP, Port, [Family|Opts], ?CONNECT_TIMEOUT) of
+	{ok, Sock} ->
+	    {ok, Sock};
+	{error, _} = Err ->
+	    do_connect(AddrsFamilies, Port, Mod, Opts, Err)
+    end;
+do_connect([], _Port, _Mod, _Opts, Err) ->
+    Err.
+
+lookup(Host) ->
+    case inet:parse_address(Host) of
+	{ok, IP} ->
+	    {ok, [{IP, get_addr_type(IP)}]};
+	{error, _} ->
+	    do_lookup([{Host, Family} || Family <- [inet6, inet]],
+		      [], {error, nxdomain})
+    end.
+
+do_lookup([{Host, Family}|HostFamilies], AddrFamilies, Err) ->
+    case inet:gethostbyname(Host, Family, ?DNS_TIMEOUT) of
+	{ok, HostEntry} ->
+	    Addrs = host_entry_to_addrs(HostEntry),
+	    AddrFamilies1 = [{Addr, Family} || Addr <- Addrs],
+	    do_lookup(HostFamilies,
+		      AddrFamilies ++ AddrFamilies1,
+		      Err);
+	{error, _} = Err1 ->
+	    do_lookup(HostFamilies, AddrFamilies, Err1)
+    end;
+do_lookup([], [], Err) ->
+    Err;
+do_lookup([], AddrFamilies, _Err) ->
+    {ok, AddrFamilies}.
+
+host_entry_to_addrs(#hostent{h_addr_list = AddrList}) ->
+    lists:filter(
+      fun(Addr) ->
+	      try get_addr_type(Addr) of
+		  _ -> true
+	      catch _:badarg ->
+		      false
+	      end
+      end, AddrList).
+
+get_addr_type({_, _, _, _}) -> inet;
+get_addr_type({_, _, _, _, _, _, _, _}) -> inet6;
+get_addr_type(_) -> erlang:error(badarg).

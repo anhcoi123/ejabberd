@@ -1,15 +1,9 @@
 -include_lib("common_test/include/ct.hrl").
--include_lib("p1_xml/include/xml.hrl").
--include("ns.hrl").
--include("ejabberd.hrl").
+-include_lib("fast_xml/include/fxml.hrl").
+-include_lib("xmpp/include/jid.hrl").
+-include_lib("xmpp/include/ns.hrl").
+-include_lib("xmpp/include/xmpp_codec.hrl").
 -include("mod_proxy65.hrl").
--include("xmpp_codec.hrl").
-
--define(STREAM_HEADER,
-	<<"<?xml version='1.0'?><stream:stream "
-	  "xmlns:stream='http://etherx.jabber.org/stream"
-	  "s' xmlns='jabber:client' to='~s' version='1.0"
-	  "'>">>).
 
 -define(STREAM_TRAILER, <<"</stream:stream>">>).
 
@@ -19,7 +13,7 @@
 
 -define(recv1(P1),
         P1 = (fun() ->
-                 V = recv(),
+                 V = suite:recv(Config),
                  case V of
                      P1 -> V;
                      _ -> suite:match_failure([V], [??P1])
@@ -28,7 +22,7 @@
 
 -define(recv2(P1, P2),
         (fun() ->
-                 case {R1 = recv(), R2 = recv()} of
+                 case {R1 = suite:recv(Config), R2 = suite:recv(Config)} of
                      {P1, P2} -> {R1, R2};
                      {P2, P1} -> {R2, R1};
                      {P1, V1} -> suite:match_failure([V1], [P2]);
@@ -41,7 +35,7 @@
 
 -define(recv3(P1, P2, P3),
         (fun() ->
-                 case R3 = recv() of
+                 case R3 = suite:recv(Config) of
                      P1 -> insert(R3, 1, ?recv2(P2, P3));
                      P2 -> insert(R3, 2, ?recv2(P1, P3));
                      P3 -> insert(R3, 3, ?recv2(P1, P2));
@@ -51,7 +45,7 @@
 
 -define(recv4(P1, P2, P3, P4),
         (fun() ->
-                 case R4 = recv() of
+                 case R4 = suite:recv(Config) of
                      P1 -> insert(R4, 1, ?recv3(P2, P3, P4));
                      P2 -> insert(R4, 2, ?recv3(P1, P3, P4));
                      P3 -> insert(R4, 3, ?recv3(P1, P2, P4));
@@ -62,7 +56,7 @@
 
 -define(recv5(P1, P2, P3, P4, P5),
         (fun() ->
-                 case R5 = recv() of
+                 case R5 = suite:recv(Config) of
                      P1 -> insert(R5, 1, ?recv4(P2, P3, P4, P5));
                      P2 -> insert(R5, 2, ?recv4(P1, P3, P4, P5));
                      P3 -> insert(R5, 3, ?recv4(P1, P2, P4, P5));
@@ -72,14 +66,42 @@
                  end
          end)()).
 
+-define(match(Pattern, Result),
+    (fun() ->
+	case Result of
+	    Pattern ->
+		ok;
+	    Mismatch ->
+		suite:match_failure([Mismatch], [??Pattern])
+	end
+    end)()).
+
+-define(match(Pattern, Result, PatternRes),
+    (fun() ->
+        case Result of
+            Pattern ->
+                PatternRes;
+            Mismatch ->
+                suite:match_failure([Mismatch], [??Pattern])
+        end
+     end)()).
+
+-define(send_recv(Send, Recv),
+    ?match(Recv, suite:send_recv(Config, Send))).
+
 -define(COMMON_VHOST, <<"localhost">>).
 -define(MNESIA_VHOST, <<"mnesia.localhost">>).
+-define(REDIS_VHOST, <<"redis.localhost">>).
 -define(MYSQL_VHOST, <<"mysql.localhost">>).
+-define(MSSQL_VHOST, <<"mssql.localhost">>).
 -define(PGSQL_VHOST, <<"pgsql.localhost">>).
 -define(SQLITE_VHOST, <<"sqlite.localhost">>).
 -define(LDAP_VHOST, <<"ldap.localhost">>).
 -define(EXTAUTH_VHOST, <<"extauth.localhost">>).
--define(RIAK_VHOST, <<"riak.localhost">>).
+-define(S2S_VHOST, <<"s2s.localhost">>).
+-define(UPLOAD_VHOST, <<"upload.localhost">>).
+
+-define(BACKENDS, [mnesia, redis, mysql, mssql, odbc, pgsql, sqlite, ldap, extauth]).
 
 insert(Val, N, Tuple) ->
     L = tuple_to_list(Tuple),

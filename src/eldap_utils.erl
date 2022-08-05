@@ -5,7 +5,7 @@
 %%% Created : 12 Oct 2006 by Mickael Remond <mremond@process-one.net>
 %%%
 %%%
-%%% ejabberd, Copyright (C) 2002-2015   ProcessOne
+%%% ejabberd, Copyright (C) 2002-2022   ProcessOne
 %%%
 %%% This program is free software; you can redistribute it and/or
 %%% modify it under the terms of the GNU General Public License as
@@ -24,22 +24,14 @@
 %%%----------------------------------------------------------------------
 
 -module(eldap_utils).
+
 -author('mremond@process-one.net').
 
--export([generate_subfilter/1,
-	 find_ldap_attrs/2,
-	 get_ldap_attr/2,
-	 get_user_part/2,
-	 make_filter/2,
-	 get_state/2,
-	 case_insensitive_match/2,
-         get_opt/3,
-         get_opt/4,
-         get_config/2,
-         decode_octet_string/3,
-	 uids_domain_subst/2]).
+-export([generate_subfilter/1, find_ldap_attrs/2, check_filter/1,
+	 get_ldap_attr/2, get_user_part/2, make_filter/2,
+	 get_state/2, case_insensitive_match/2,
+	 decode_octet_string/3, uids_domain_subst/2]).
 
--include("ejabberd.hrl").
 -include("logger.hrl").
 -include("eldap.hrl").
 
@@ -143,6 +135,11 @@ make_filter(Data, UIDs) ->
 	    eldap:'and'(Filter)
     end.
 
+check_filter(F) ->
+    NewF = iolist_to_binary(F),
+    {ok, _} = eldap_filter:parse(NewF),
+    NewF.
+
 -spec case_insensitive_match(binary(), binary()) -> boolean().
 
 case_insensitive_match(X, Y) ->
@@ -161,144 +158,54 @@ get_state(Server, Module) ->
 %% we look from alias domain (%d) and make the substitution
 %% with the actual host domain
 %% This help when you need to configure many virtual domains.
--spec uids_domain_subst(binary(), [{binary(), binary()}]) -> 
+-spec uids_domain_subst(binary(), [{binary(), binary()}]) ->
                                [{binary(), binary()}].
 
 uids_domain_subst(Host, UIDs) ->
     lists:map(fun({U,V}) ->
                       {U, eldap_filter:do_sub(V,[{<<"%d">>, Host}])};
-                  (A) -> A 
+                  (A) -> A
               end,
               UIDs).
 
--spec get_opt({atom(), binary()}, list(), fun()) -> any().
-
-get_opt({Key, Host}, Opts, F) ->
-    get_opt({Key, Host}, Opts, F, undefined).
-
--spec get_opt({atom(), binary()}, list(), fun(), any()) -> any().
-
-get_opt({Key, Host}, Opts, F, Default) ->
-    case gen_mod:get_opt(Key, Opts, F, undefined) of
-        undefined ->
-            ejabberd_config:get_option(
-              {Key, Host}, F, Default);
-        Val ->
-            Val
-    end.
-
--spec get_config(binary(), list()) -> eldap_config().
-
-get_config(Host, Opts) ->
-    Servers = get_opt({ldap_servers, Host}, Opts,
-                      fun(L) ->
-                              [iolist_to_binary(H) || H <- L]
-                      end, [<<"localhost">>]),
-    Backups = get_opt({ldap_backups, Host}, Opts,
-                      fun(L) ->
-                              [iolist_to_binary(H) || H <- L]
-                      end, []),
-    Encrypt = get_opt({ldap_encrypt, Host}, Opts,
-                      fun(tls) -> tls;
-                         (starttls) -> starttls;
-                         (none) -> none
-                      end, none),
-    TLSVerify = get_opt({ldap_tls_verify, Host}, Opts,
-                        fun(hard) -> hard;
-                           (soft) -> soft;
-                           (false) -> false
-                        end, false),
-    TLSCAFile = get_opt({ldap_tls_cacertfile, Host}, Opts,
-                        fun iolist_to_binary/1),
-    TLSDepth = get_opt({ldap_tls_depth, Host}, Opts,
-                       fun(I) when is_integer(I), I>=0 -> I end),
-    Port = get_opt({ldap_port, Host}, Opts,
-                   fun(I) when is_integer(I), I>0 -> I end,
-                   case Encrypt of
-                       tls -> ?LDAPS_PORT;
-                       starttls -> ?LDAP_PORT;
-                       _ -> ?LDAP_PORT
-                   end),
-    RootDN = get_opt({ldap_rootdn, Host}, Opts,
-                     fun iolist_to_binary/1,
-                     <<"">>),
-    Password = get_opt({ldap_password, Host}, Opts,
-                 fun iolist_to_binary/1,
-                 <<"">>),
-    Base = get_opt({ldap_base, Host}, Opts,
-                   fun iolist_to_binary/1,
-                   <<"">>),
-    OldDerefAliases = get_opt({deref_aliases, Host}, Opts,
-                              fun(never) -> never;
-                                 (searching) -> searching;
-                                 (finding) -> finding;
-                                 (always) -> always
-                              end, unspecified),
-    DerefAliases =
-        if OldDerefAliases == unspecified ->
-                get_opt({ldap_deref_aliases, Host}, Opts,
-                        fun(never) -> never;
-                           (searching) -> searching;
-                           (finding) -> finding;
-                           (always) -> always
-                        end, never);
-           true ->
-                ?WARNING_MSG("Option 'deref_aliases' is deprecated. "
-                             "The option is still supported "
-                             "but it is better to fix your config: "
-                             "use 'ldap_deref_aliases' instead.", []),
-                OldDerefAliases
-        end,
-   #eldap_config{servers = Servers,
-                  backups = Backups,
-                  tls_options = [{encrypt, Encrypt},
-                                 {tls_verify, TLSVerify},
-                                 {tls_cacertfile, TLSCAFile},
-                                 {tls_depth, TLSDepth}],
-                  port = Port,
-                  dn = RootDN,
-                  password = Password,
-                  base = Base,
-                  deref_aliases = DerefAliases}.
-
-%%---------------------------------------- 
+%%----------------------------------------
 %% Borrowed from asn1rt_ber_bin_v2.erl
 %%----------------------------------------
 
 %%% The tag-number for universal types
--define(N_BOOLEAN, 1). 
--define(N_INTEGER, 2). 
+-define(N_BOOLEAN, 1).
+-define(N_INTEGER, 2).
 -define(N_BIT_STRING, 3).
 -define(N_OCTET_STRING, 4).
--define(N_NULL, 5). 
--define(N_OBJECT_IDENTIFIER, 6). 
--define(N_OBJECT_DESCRIPTOR, 7). 
--define(N_EXTERNAL, 8). 
--define(N_REAL, 9). 
--define(N_ENUMERATED, 10). 
--define(N_EMBEDDED_PDV, 11). 
--define(N_SEQUENCE, 16). 
--define(N_SET, 17). 
+-define(N_NULL, 5).
+-define(N_OBJECT_IDENTIFIER, 6).
+-define(N_OBJECT_DESCRIPTOR, 7).
+-define(N_EXTERNAL, 8).
+-define(N_REAL, 9).
+-define(N_ENUMERATED, 10).
+-define(N_EMBEDDED_PDV, 11).
+-define(N_SEQUENCE, 16).
+-define(N_SET, 17).
 -define(N_NumericString, 18).
 -define(N_PrintableString, 19).
 -define(N_TeletexString, 20).
 -define(N_VideotexString, 21).
 -define(N_IA5String, 22).
--define(N_UTCTime, 23). 
--define(N_GeneralizedTime, 24). 
+-define(N_UTCTime, 23).
+-define(N_GeneralizedTime, 24).
 -define(N_GraphicString, 25).
 -define(N_VisibleString, 26).
 -define(N_GeneralString, 27).
 -define(N_UniversalString, 28).
 -define(N_BMPString, 30).
 
-decode_octet_string(Buffer, Range, Tags) -> 
+decode_octet_string(Buffer, Range, Tags) ->
 %    NewTags = new_tags(HasTag,#tag{class=?UNIVERSAL,number=?N_OCTET_STRING}),
     decode_restricted_string(Buffer, Range, Tags).
 
 decode_restricted_string(Tlv, Range, TagsIn) ->
     Val = match_tags(Tlv, TagsIn),
-    Val2 = 
+    Val2 =
 	case Val of
 	    PartList = [_H|_T] -> % constructed val
 		collect_parts(PartList);
@@ -322,12 +229,12 @@ check_and_convert_restricted_string(Val, Range) ->
 	    NewVal;
 	{{Lb,_Ub},_Ext=[Min|_]} when StrLen >= Lb; StrLen >= Min ->
 	    NewVal;
-	{{Lb1,Ub1},{Lb2,Ub2}} when StrLen >= Lb1, StrLen =< Ub1; 
+	{{Lb1,Ub1},{Lb2,Ub2}} when StrLen >= Lb1, StrLen =< Ub1;
 				   StrLen =< Ub2, StrLen >= Lb2 ->
 	    NewVal;
 	StrLen -> % fixed length constraint
 	    NewVal;
-	{_,_} -> 
+	{_,_} ->
 	    exit({error,{asn1,{length,Range,Val}}});
 	_Len when is_integer(_Len) ->
 	    exit({error,{asn1,{length,Range,Val}}});
@@ -335,9 +242,9 @@ check_and_convert_restricted_string(Val, Range) ->
 	    NewVal
     end.
 
-%%---------------------------------------- 
-%% Decode the in buffer to bits 
-%%---------------------------------------- 
+%%----------------------------------------
+%% Decode the in buffer to bits
+%%----------------------------------------
 match_tags({T,V},[T]) ->
     V;
 match_tags({T,V}, [T|Tt]) ->
@@ -363,7 +270,7 @@ collect_parts([{_T,V}|Rest],Acc) ->
 collect_parts([],Acc) ->
     list_to_binary(lists:reverse(Acc)).
 
-collect_parts_bit([{?N_BIT_STRING,<<Unused,Bits/binary>>}|Rest],Acc,Uacc) ->    
+collect_parts_bit([{?N_BIT_STRING,<<Unused,Bits/binary>>}|Rest],Acc,Uacc) ->
     collect_parts_bit(Rest,[Bits|Acc],Unused+Uacc);
 collect_parts_bit([],Acc,Uacc) ->
     list_to_binary([Uacc|lists:reverse(Acc)]).

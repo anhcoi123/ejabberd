@@ -5,7 +5,7 @@
 %%% Created : 6 Mar 2010 by Karim Gemayel <karim.gemayel@process-one.net>
 %%%
 %%%
-%%% ejabberd, Copyright (C) 2002-2015   ProcessOne
+%%% ejabberd, Copyright (C) 2002-2022   ProcessOne
 %%%
 %%% This program is free software; you can redistribute it and/or
 %%% modify it under the terms of the GNU General Public License as
@@ -25,67 +25,85 @@
 
 -module(mod_sic).
 
+-protocol({xep, 279, '0.2'}).
+
 -author('karim.gemayel@process-one.net').
 
 -behaviour(gen_mod).
 
--export([start/2, stop/1, process_local_iq/3,
-	 process_sm_iq/3]).
+-export([start/2, stop/1, reload/3, process_local_iq/1,
+	 process_sm_iq/1, mod_options/1, depends/2, mod_doc/0]).
 
--include("ejabberd.hrl").
 -include("logger.hrl").
+-include_lib("xmpp/include/xmpp.hrl").
+-include("translate.hrl").
 
--include("jlib.hrl").
-
--define(NS_SIC, <<"urn:xmpp:sic:0">>).
-
-start(Host, Opts) ->
-    IQDisc = gen_mod:get_opt(iqdisc, Opts, fun gen_iq_handler:check_type/1,
-                             one_queue),
-    gen_iq_handler:add_iq_handler(ejabberd_local, Host,
-				  ?NS_SIC, ?MODULE, process_local_iq, IQDisc),
-    gen_iq_handler:add_iq_handler(ejabberd_sm, Host,
-				  ?NS_SIC, ?MODULE, process_sm_iq, IQDisc).
+start(Host, _Opts) ->
+    gen_iq_handler:add_iq_handler(ejabberd_local, Host, ?NS_SIC_0,
+				  ?MODULE, process_local_iq),
+    gen_iq_handler:add_iq_handler(ejabberd_sm, Host, ?NS_SIC_0,
+				  ?MODULE, process_sm_iq),
+    gen_iq_handler:add_iq_handler(ejabberd_local, Host, ?NS_SIC_1,
+				  ?MODULE, process_local_iq),
+    gen_iq_handler:add_iq_handler(ejabberd_sm, Host, ?NS_SIC_1,
+				  ?MODULE, process_sm_iq).
 
 stop(Host) ->
-    gen_iq_handler:remove_iq_handler(ejabberd_local, Host,
-				     ?NS_SIC),
-    gen_iq_handler:remove_iq_handler(ejabberd_sm, Host,
-				     ?NS_SIC).
+    gen_iq_handler:remove_iq_handler(ejabberd_local, Host, ?NS_SIC_0),
+    gen_iq_handler:remove_iq_handler(ejabberd_sm, Host, ?NS_SIC_0),
+    gen_iq_handler:remove_iq_handler(ejabberd_local, Host, ?NS_SIC_1),
+    gen_iq_handler:remove_iq_handler(ejabberd_sm, Host, ?NS_SIC_1).
 
-process_local_iq(#jid{user = User, server = Server,
-		      resource = Resource},
-		 _To, #iq{type = get, sub_el = _SubEl} = IQ) ->
-    get_ip({User, Server, Resource}, IQ);
-process_local_iq(_From, _To,
-		 #iq{type = set, sub_el = SubEl} = IQ) ->
-    IQ#iq{type = error, sub_el = [SubEl, ?ERR_NOT_ALLOWED]}.
+reload(_Host, _NewOpts, _OldOpts) ->
+    ok.
 
-process_sm_iq(#jid{user = User, server = Server,
-		   resource = Resource},
-	      #jid{user = User, server = Server},
-	      #iq{type = get, sub_el = _SubEl} = IQ) ->
+depends(_Host, _Opts) ->
+    [].
+
+process_local_iq(#iq{from = #jid{user = User, server = Server,
+				 resource = Resource},
+		     type = get} = IQ) ->
     get_ip({User, Server, Resource}, IQ);
-process_sm_iq(_From, _To,
-	      #iq{type = get, sub_el = SubEl} = IQ) ->
-    IQ#iq{type = error, sub_el = [SubEl, ?ERR_FORBIDDEN]};
-process_sm_iq(_From, _To,
-	      #iq{type = set, sub_el = SubEl} = IQ) ->
-    IQ#iq{type = error, sub_el = [SubEl, ?ERR_NOT_ALLOWED]}.
+process_local_iq(#iq{type = set, lang = Lang} = IQ) ->
+    Txt = ?T("Value 'set' of 'type' attribute is not allowed"),
+    xmpp:make_error(IQ, xmpp:err_not_allowed(Txt, Lang)).
+
+process_sm_iq(#iq{from = #jid{user = User, server = Server,
+			      resource = Resource},
+		  to = #jid{user = User, server = Server},
+		  type = get} = IQ) ->
+    get_ip({User, Server, Resource}, IQ);
+process_sm_iq(#iq{type = get, lang = Lang} = IQ) ->
+    Txt = ?T("Query to another users is forbidden"),
+    xmpp:make_error(IQ, xmpp:err_forbidden(Txt, Lang));
+process_sm_iq(#iq{type = set, lang = Lang} = IQ) ->
+    Txt = ?T("Value 'set' of 'type' attribute is not allowed"),
+    xmpp:make_error(IQ, xmpp:err_not_allowed(Txt, Lang)).
 
 get_ip({User, Server, Resource},
-       #iq{sub_el =
-	       #xmlel{name = Name, attrs = Attrs} = SubEl} =
-	   IQ) ->
+       #iq{lang = Lang, sub_els = [#sic{xmlns = NS}]} = IQ) ->
     case ejabberd_sm:get_user_ip(User, Server, Resource) of
-      {IP, _} when is_tuple(IP) ->
-	  IQ#iq{type = result,
-		sub_el =
-		    [#xmlel{name = Name, attrs = Attrs,
-			    children =
-				[{xmlcdata,
-				  iolist_to_binary(jlib:ip_to_list(IP))}]}]};
-      _ ->
-	  IQ#iq{type = error,
-		sub_el = [SubEl, ?ERR_INTERNAL_SERVER_ERROR]}
+	{IP, Port} when is_tuple(IP) ->
+	    Result = case NS of
+			 ?NS_SIC_0 -> #sic{ip = IP, xmlns = NS};
+			 ?NS_SIC_1 -> #sic{ip = IP, port = Port, xmlns = NS}
+		     end,
+	    xmpp:make_iq_result(IQ, Result);
+	_ ->
+	    Txt = ?T("User session not found"),
+	    xmpp:make_error(IQ, xmpp:err_item_not_found(Txt, Lang))
     end.
+
+mod_options(_Host) ->
+    [].
+
+mod_doc() ->
+    #{desc =>
+          [?T("This module adds support for "
+              "https://xmpp.org/extensions/xep-0279.html"
+              "[XEP-0279: Server IP Check]. This protocol enables "
+              "a client to discover its external IP address."), "",
+           ?T("WARNING: The protocol extension is deferred and seems "
+              "like there are no clients supporting it, so using this "
+              "module is not recommended and, furthermore, the module "
+              "might be removed in the future.")]}.

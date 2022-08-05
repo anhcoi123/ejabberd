@@ -1,32 +1,36 @@
-%%% ====================================================================
-%%% ``The contents of this file are subject to the Erlang Public License,
-%%% Version 1.1, (the "License"); you may not use this file except in
-%%% compliance with the License. You should have received a copy of the
-%%% Erlang Public License along with this software. If not, it can be
-%%% retrieved via the world wide web at http://www.erlang.org/.
+%%%----------------------------------------------------------------------
+%%% File    : pubsub_subscription.erl
+%%% Author  : Brian Cully <bjc@kublai.com>
+%%% Purpose : Handle pubsub subscriptions options
+%%% Created : 29 May 2009 by Brian Cully <bjc@kublai.com>
 %%%
-%%% Software distributed under the License is distributed on an "AS IS"
-%%% basis, WITHOUT WARRANTY OF ANY KIND, either express or implied. See
-%%% the License for the specific language governing rights and limitations
-%%% under the License.
 %%%
-%%% The Initial Developer of the Original Code is ProcessOne.
-%%% Portions created by ProcessOne are Copyright 2006-2015, ProcessOne
-%%% All Rights Reserved.''
-%%% This software is copyright 2006-2015, ProcessOne.
+%%% ejabberd, Copyright (C) 2002-2022   ProcessOne
 %%%
-%%% @author Brian Cully <bjc@kublai.com>
-%%% @version {@vsn}, {@date} {@time}
-%%% @end
-%%% ====================================================================
+%%% This program is free software; you can redistribute it and/or
+%%% modify it under the terms of the GNU General Public License as
+%%% published by the Free Software Foundation; either version 2 of the
+%%% License, or (at your option) any later version.
+%%%
+%%% This program is distributed in the hope that it will be useful,
+%%% but WITHOUT ANY WARRANTY; without even the implied warranty of
+%%% MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+%%% General Public License for more details.
+%%%
+%%% You should have received a copy of the GNU General Public License along
+%%% with this program; if not, write to the Free Software Foundation, Inc.,
+%%% 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+%%%
+%%%----------------------------------------------------------------------
 
 -module(pubsub_subscription).
 
 -author("bjc@kublai.com").
 
 %% API
--export([init/0, subscribe_node/3, unsubscribe_node/3,
+-export([init/3, subscribe_node/3, unsubscribe_node/3,
     get_subscription/3, set_subscription/4,
+    make_subid/0,
     get_options_xform/2, parse_options_xform/1]).
 
 % Internal function also exported for use in transactional bloc from pubsub plugins
@@ -34,8 +38,8 @@
     read_subscription/3, write_subscription/4]).
 
 -include("pubsub.hrl").
-
--include("jlib.hrl").
+-include_lib("xmpp/include/xmpp.hrl").
+-include("translate.hrl").
 
 -define(PUBSUB_DELIVER, <<"pubsub#deliver">>).
 -define(PUBSUB_DIGEST, <<"pubsub#digest">>).
@@ -69,7 +73,7 @@
 %%====================================================================
 %% API
 %%====================================================================
-init() -> ok = create_table().
+init(_Host, _ServerHost, _Opts) -> ok = create_table().
 
 subscribe_node(JID, NodeId, Options) ->
     case catch mnesia:sync_dirty(fun add_subscription/3, [JID, NodeId, Options])
@@ -108,36 +112,21 @@ get_options_xform(Lang, Options) ->
     Keys = [deliver, show_values, subscription_type, subscription_depth],
     XFields = [get_option_xfield(Lang, Key, Options) || Key <- Keys],
     {result,
-	#xmlel{name = <<"x">>,
-	    attrs = [{<<"xmlns">>, ?NS_XDATA}],
-	    children =
-	    [#xmlel{name = <<"field">>,
-		    attrs =
-		    [{<<"var">>, <<"FORM_TYPE">>},
-			{<<"type">>, <<"hidden">>}],
-		    children =
-		    [#xmlel{name = <<"value">>, attrs = [],
-			    children =
-			    [{xmlcdata, ?NS_PUBSUB_SUB_OPTIONS}]}]}]
-	    ++ XFields}}.
+     #xdata{type = form,
+	    fields = [#xdata_field{type = hidden,
+				   var = <<"FORM_TYPE">>,
+				   values = [?NS_PUBSUB_SUB_OPTIONS]}|
+		      XFields]}}.
 
 parse_options_xform(XFields) ->
-    case xml:remove_cdata(XFields) of
-	[#xmlel{name = <<"x">>} = XEl] ->
-	    case jlib:parse_xdata_submit(XEl) of
-		XData when is_list(XData) ->
-		    Opts = set_xoption(XData, []),
-		    {result, Opts};
-		Other -> Other
-	    end;
-	_ -> {result, []}
-    end.
+    Opts = set_xoption(XFields, []),
+    {result, Opts}.
 
 %%====================================================================
 %% Internal functions
 %%====================================================================
 create_table() ->
-    case mnesia:create_table(pubsub_subscription,
+    case ejabberd_mnesia:create(?MODULE, pubsub_subscription,
 	    [{disc_copies, [node()]},
 		{attributes,
 		    record_info(fields, pubsub_subscription)},
@@ -148,13 +137,9 @@ create_table() ->
 	Other -> Other
     end.
 
--spec(add_subscription/3 ::
-    (
-	_JID    :: ljid(),
-	_NodeId :: mod_pubsub:nodeIdx(),
-	Options :: [] | mod_pubsub:subOptions())
-    -> SubId :: mod_pubsub:subId()
-    ).
+-spec add_subscription(_JID :: ljid(), _NodeId :: mod_pubsub:nodeIdx(),
+		       Options :: [] | mod_pubsub:subOptions()) ->
+			      SubId :: mod_pubsub:subId().
 
 add_subscription(_JID, _NodeId, []) -> make_subid();
 add_subscription(_JID, _NodeId, Options) ->
@@ -162,25 +147,13 @@ add_subscription(_JID, _NodeId, Options) ->
     mnesia:write(#pubsub_subscription{subid = SubID, options = Options}),
     SubID.
 
--spec(delete_subscription/3 ::
-    (
-	_JID    :: _,
-	_NodeId :: _,
-	SubId   :: mod_pubsub:subId())
-    -> ok
-    ).
+-spec delete_subscription(_JID :: _, _NodeId :: _, SubId :: mod_pubsub:subId()) -> ok.
 
 delete_subscription(_JID, _NodeId, SubID) ->
     mnesia:delete({pubsub_subscription, SubID}).
 
--spec(read_subscription/3 ::
-    (
-	_JID    :: ljid(),
-	_NodeId :: _,
-	SubID   :: mod_pubsub:subId())
-    -> mod_pubsub:pubsubSubscription()
-    | {error, notfound}
-    ).
+-spec read_subscription(_JID :: ljid(), _NodeId :: _, SubID :: mod_pubsub:subId()) ->
+			       mod_pubsub:pubsubSubscription() | {error, notfound}.
 
 read_subscription(_JID, _NodeId, SubID) ->
     case mnesia:read({pubsub_subscription, SubID}) of
@@ -188,22 +161,16 @@ read_subscription(_JID, _NodeId, SubID) ->
 	_ -> {error, notfound}
     end.
 
--spec(write_subscription/4 ::
-    (
-	_JID    :: ljid(),
-	_NodeId :: _,
-	SubID   :: mod_pubsub:subId(),
-	Options :: mod_pubsub:subOptions())
-    -> ok
-    ).
+-spec write_subscription(_JID :: ljid(), _NodeId :: _, SubID :: mod_pubsub:subId(),
+			 Options :: mod_pubsub:subOptions()) -> ok.
 
 write_subscription(_JID, _NodeId, SubID, Options) ->
     mnesia:write(#pubsub_subscription{subid = SubID, options = Options}).
 
--spec(make_subid/0 :: () -> SubId::mod_pubsub:subId()).
+-spec make_subid() -> SubId::mod_pubsub:subId().
 make_subid() ->
-    {T1, T2, T3} = now(),
-    iolist_to_binary(io_lib:fwrite("~.16B~.16B~.16B", [T1, T2, T3])).
+    {T1, T2, T3} = erlang:timestamp(),
+    (str:format("~.16B~.16B~.16B", [T1, T2, T3])).
 
 %%
 %% Subscription XForm processing.
@@ -233,39 +200,42 @@ var_xfield(?PUBSUB_SUBSCRIPTION_TYPE) -> subscription_type;
 var_xfield(?PUBSUB_SUBSCRIPTION_DEPTH) -> subscription_depth;
 var_xfield(_) -> {error, badarg}.
 
-val_xfield(deliver, [Val]) -> xopt_to_bool(Val);
-val_xfield(digest, [Val]) -> xopt_to_bool(Val);
-val_xfield(digest_frequency, [Val]) ->
-    case catch jlib:binary_to_integer(Val) of
+val_xfield(deliver = Opt, [Val]) -> xopt_to_bool(Opt, Val);
+val_xfield(digest = Opt, [Val]) -> xopt_to_bool(Opt, Val);
+val_xfield(digest_frequency = Opt, [Val]) ->
+    case catch binary_to_integer(Val) of
 	N when is_integer(N) -> N;
-	_ -> {error, ?ERR_NOT_ACCEPTABLE}
+	_ ->
+	    Txt = {?T("Value of '~s' should be integer"), [Opt]},
+	    {error, xmpp:err_not_acceptable(Txt, ejabberd_option:language())}
     end;
-val_xfield(expire, [Val]) -> jlib:datetime_string_to_timestamp(Val);
-val_xfield(include_body, [Val]) -> xopt_to_bool(Val);
+val_xfield(expire = Opt, [Val]) ->
+    try xmpp_util:decode_timestamp(Val)
+    catch _:{bad_timestamp, _} ->
+	    Txt = {?T("Value of '~s' should be datetime string"), [Opt]},
+	    {error, xmpp:err_not_acceptable(Txt, ejabberd_option:language())}
+    end;
+val_xfield(include_body = Opt, [Val]) -> xopt_to_bool(Opt, Val);
 val_xfield(show_values, Vals) -> Vals;
 val_xfield(subscription_type, [<<"items">>]) -> items;
 val_xfield(subscription_type, [<<"nodes">>]) -> nodes;
 val_xfield(subscription_depth, [<<"all">>]) -> all;
-val_xfield(subscription_depth, [Depth]) ->
-    case catch jlib:binary_to_integer(Depth) of
+val_xfield(subscription_depth = Opt, [Depth]) ->
+    case catch binary_to_integer(Depth) of
 	N when is_integer(N) -> N;
-	_ -> {error, ?ERR_NOT_ACCEPTABLE}
+	_ ->
+	    Txt = {?T("Value of '~s' should be integer"), [Opt]},
+	    {error, xmpp:err_not_acceptable(Txt, ejabberd_option:language())}
     end.
 
 %% Convert XForm booleans to Erlang booleans.
-xopt_to_bool(<<"0">>) -> false;
-xopt_to_bool(<<"1">>) -> true;
-xopt_to_bool(<<"false">>) -> false;
-xopt_to_bool(<<"true">>) -> true;
-xopt_to_bool(_) -> {error, ?ERR_NOT_ACCEPTABLE}.
-
--spec(get_option_xfield/3 ::
-    (
-	Lang :: binary(),
-	Key  :: atom(),
-	Options :: mod_pubsub:subOptions())
-    -> xmlel()
-    ).
+xopt_to_bool(_, <<"0">>) -> false;
+xopt_to_bool(_, <<"1">>) -> true;
+xopt_to_bool(_, <<"false">>) -> false;
+xopt_to_bool(_, <<"true">>) -> true;
+xopt_to_bool(Option, _) ->
+    Txt = {?T("Value of '~s' should be boolean"), [Option]},
+    {error, xmpp:err_not_acceptable(Txt, ejabberd_option:language())}.
 
 %% Return a field for an XForm for Key, with data filled in, if
 %% applicable, from Options.
@@ -275,33 +245,22 @@ get_option_xfield(Lang, Key, Options) ->
     {Type, OptEls} = type_and_options(xfield_type(Key), Lang),
     Vals = case lists:keysearch(Key, 1, Options) of
 	{value, {_, Val}} ->
-	    [tr_xfield_values(Vals)
-		|| Vals <- xfield_val(Key, Val)];
-	false -> []
+		   [xfield_val(Key, Val)];
+	       false ->
+		   []
     end,
-    #xmlel{name = <<"field">>,
-	attrs =
-	[{<<"var">>, Var}, {<<"type">>, Type},
-	    {<<"label">>, translate:translate(Lang, Label)}],
-	children = OptEls ++ Vals}.
+    #xdata_field{type = Type, var = Var,
+		 label = translate:translate(Lang, Label),
+		 values = Vals,
+		 options = OptEls}.
 
 type_and_options({Type, Options}, Lang) ->
     {Type, [tr_xfield_options(O, Lang) || O <- Options]};
 type_and_options(Type, _Lang) -> {Type, []}.
 
 tr_xfield_options({Value, Label}, Lang) ->
-    #xmlel{name = <<"option">>,
-	attrs =
-	[{<<"label">>, translate:translate(Lang, Label)}],
-	children =
-	[#xmlel{name = <<"value">>, attrs = [],
-		children = [{xmlcdata, Value}]}]}.
-
-tr_xfield_values(Value) ->
-    %% Return the XForm variable name for a subscription option key.
-    %% Return the XForm variable type for a subscription option key.
-    #xmlel{name = <<"value">>, attrs = [],
-	children = [{xmlcdata, Value}]}.
+    #xdata_option{label = translate:translate(Lang, Label),
+		  value = Value}.
 
 xfield_var(deliver) -> ?PUBSUB_DELIVER;
 %xfield_var(digest) -> ?PUBSUB_DIGEST;
@@ -312,24 +271,24 @@ xfield_var(show_values) -> ?PUBSUB_SHOW_VALUES;
 xfield_var(subscription_type) -> ?PUBSUB_SUBSCRIPTION_TYPE;
 xfield_var(subscription_depth) -> ?PUBSUB_SUBSCRIPTION_DEPTH.
 
-xfield_type(deliver) -> <<"boolean">>;
-%xfield_type(digest) -> <<"boolean">>;
-%xfield_type(digest_frequency) -> <<"text-single">>;
-%xfield_type(expire) -> <<"text-single">>;
-%xfield_type(include_body) -> <<"boolean">>;
+xfield_type(deliver) -> boolean;
+%xfield_type(digest) -> boolean;
+%xfield_type(digest_frequency) -> 'text-single';
+%xfield_type(expire) -> 'text-single';
+%xfield_type(include_body) -> boolean;
 xfield_type(show_values) ->
-    {<<"list-multi">>,
+    {'list-multi',
 	[{<<"away">>, ?SHOW_VALUE_AWAY_LABEL},
 	    {<<"chat">>, ?SHOW_VALUE_CHAT_LABEL},
 	    {<<"dnd">>, ?SHOW_VALUE_DND_LABEL},
 	    {<<"online">>, ?SHOW_VALUE_ONLINE_LABEL},
 	    {<<"xa">>, ?SHOW_VALUE_XA_LABEL}]};
 xfield_type(subscription_type) ->
-    {<<"list-single">>,
+    {'list-single',
 	[{<<"items">>, ?SUBSCRIPTION_TYPE_VALUE_ITEMS_LABEL},
 	    {<<"nodes">>, ?SUBSCRIPTION_TYPE_VALUE_NODES_LABEL}]};
 xfield_type(subscription_depth) ->
-    {<<"list-single">>,
+    {'list-single',
 	[{<<"1">>, ?SUBSCRIPTION_DEPTH_VALUE_ONE_LABEL},
 	    {<<"all">>, ?SUBSCRIPTION_DEPTH_VALUE_ALL_LABEL}]}.
 
@@ -348,7 +307,7 @@ xfield_label(subscription_depth) -> ?SUBSCRIPTION_DEPTH_LABEL.
 xfield_val(deliver, Val) -> [bool_to_xopt(Val)];
 %xfield_val(digest, Val) -> [bool_to_xopt(Val)];
 %xfield_val(digest_frequency, Val) ->
-%    [iolist_to_binary(integer_to_list(Val))];
+%    [integer_to_binary(Val))];
 %xfield_val(expire, Val) ->
 %    [jlib:now_to_utc_string(Val)];
 %xfield_val(include_body, Val) -> [bool_to_xopt(Val)];
@@ -357,7 +316,7 @@ xfield_val(subscription_type, items) -> [<<"items">>];
 xfield_val(subscription_type, nodes) -> [<<"nodes">>];
 xfield_val(subscription_depth, all) -> [<<"all">>];
 xfield_val(subscription_depth, N) ->
-    [iolist_to_binary(integer_to_list(N))].
+    [integer_to_binary(N)].
 
 
 bool_to_xopt(true) -> <<"true">>;

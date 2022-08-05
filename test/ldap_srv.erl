@@ -1,11 +1,28 @@
 %%%-------------------------------------------------------------------
-%%% @author Evgeniy Khramtsov <ekhramtsov@process-one.net>
-%%% @copyright (C) 2013, Evgeniy Khramtsov
-%%% @doc
-%%%     Simple LDAP server intended for LDAP modules testing
-%%% @end
+%%% Author  : Evgeny Khramtsov <ekhramtsov@process-one.net>
 %%% Created : 21 Jun 2013 by Evgeniy Khramtsov <ekhramtsov@process-one.net>
-%%%-------------------------------------------------------------------
+%%%
+%%%
+%%% ejabberd, Copyright (C) 2002-2022   ProcessOne
+%%%
+%%% This program is free software; you can redistribute it and/or
+%%% modify it under the terms of the GNU General Public License as
+%%% published by the Free Software Foundation; either version 2 of the
+%%% License, or (at your option) any later version.
+%%%
+%%% This program is distributed in the hope that it will be useful,
+%%% but WITHOUT ANY WARRANTY; without even the implied warranty of
+%%% MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+%%% General Public License for more details.
+%%%
+%%% You should have received a copy of the GNU General Public License along
+%%% with this program; if not, write to the Free Software Foundation, Inc.,
+%%% 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+%%%
+%%%----------------------------------------------------------------------
+
+%%%     Simple LDAP server intended for LDAP modules testing
+
 -module(ldap_srv).
 
 -behaviour(gen_server).
@@ -28,7 +45,7 @@
 -define(ERROR_MSG(Fmt, Args), error_logger:error_msg(Fmt, Args)).
 
 -define(TCP_SEND_TIMEOUT, 32000).
--define(SERVER, ?MODULE). 
+-define(SERVER, ?MODULE).
 
 -record(state, {listener = make_ref() :: reference()}).
 
@@ -54,7 +71,7 @@ init([LDIFFile]) ->
             case load_ldif(LDIFFile) of
                 {ok, Tree} ->
                     ?INFO_MSG("LDIF tree loaded, "
-                              "ready to accept connections", []),
+                              "ready to accept connections at ~B", [1389]),
                     {_Pid, MRef} =
                         spawn_monitor(
                           fun() -> accept(ListenSocket, Tree) end
@@ -105,7 +122,7 @@ accept(ListenSocket, Tree) ->
 process(Socket, Tree) ->
     case gen_tcp:recv(Socket, 0) of
         {ok, B} ->
-            case asn1rt:decode('ELDAPv3', 'LDAPMessage', B) of
+            case 'ELDAPv3':decode('LDAPMessage', B) of
                 {ok, Msg} ->
                     Replies = process_msg(Msg, Tree),
                     Id = Msg#'LDAPMessage'.messageID,
@@ -114,8 +131,8 @@ process(Socket, Tree) ->
                               Reply = #'LDAPMessage'{messageID = Id,
                                                      protocolOp = ReplyOp},
                               %%?DEBUG("sent:~n~p", [Reply]),
-                              {ok, Bytes} = asn1rt:encode(
-                                              'ELDAPv3', 'LDAPMessage', Reply),
+                              {ok, Bytes} = 'ELDAPv3':encode(
+                                              'LDAPMessage', Reply),
                               gen_tcp:send(Socket, Bytes)
                       end, Replies),
                     process(Socket, Tree);

@@ -1,36 +1,30 @@
-%%% ====================================================================
-%%% ``The contents of this file are subject to the Erlang Public License,
-%%% Version 1.1, (the "License"); you may not use this file except in
-%%% compliance with the License. You should have received a copy of the
-%%% Erlang Public License along with this software. If not, it can be
-%%% retrieved via the world wide web at http://www.erlang.org/.
-%%%
-%%% Software distributed under the License is distributed on an "AS IS"
-%%% basis, WITHOUT WARRANTY OF ANY KIND, either express or implied. See
-%%% the License for the specific language governing rights and limitations
-%%% under the License.
-%%%
-%%% The Initial Developer of the Original Code is ProcessOne.
-%%% Portions created by ProcessOne are Copyright 2006-2015, ProcessOne
-%%% All Rights Reserved.''
-%%% This software is copyright 2006-2015, ProcessOne.
+%%%----------------------------------------------------------------------
+%%% File    : gen_pubsub_nodetree.erl
+%%% Author  : Christophe Romain <christophe.romain@process-one.net>
+%%% Purpose : Define the pubsub node tree plugin behaviour
+%%% Created :  1 Dec 2007 by Christophe Romain <christophe.romain@process-one.net>
 %%%
 %%%
-%%% @copyright 2006-2015 ProcessOne
-%%% @author Christophe Romain <christophe.romain@process-one.net>
-%%%   [http://www.process-one.net/]
-%%% @version {@vsn}, {@date} {@time}
-%%% @end
-%%% ====================================================================
-
-%%% @private
-%%% @doc <p>The module <strong>{@module}</strong> defines the PubSub node
-%%% tree plugin behaviour. This behaviour is used to check that a PubSub
-%%% node tree plugin respects the current ejabberd PubSub plugin API.</p>
+%%% ejabberd, Copyright (C) 2002-2022   ProcessOne
+%%%
+%%% This program is free software; you can redistribute it and/or
+%%% modify it under the terms of the GNU General Public License as
+%%% published by the Free Software Foundation; either version 2 of the
+%%% License, or (at your option) any later version.
+%%%
+%%% This program is distributed in the hope that it will be useful,
+%%% but WITHOUT ANY WARRANTY; without even the implied warranty of
+%%% MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+%%% General Public License for more details.
+%%%
+%%% You should have received a copy of the GNU General Public License along
+%%% with this program; if not, write to the Free Software Foundation, Inc.,
+%%% 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+%%%
+%%%----------------------------------------------------------------------
 
 -module(gen_pubsub_nodetree).
 
--include("jlib.hrl").
 
 -type(host() :: mod_pubsub:host()).
 -type(nodeId() :: mod_pubsub:nodeId()).
@@ -42,65 +36,70 @@
 	ServerHost :: binary(),
 	Opts :: [any()]) -> atom().
 
+-include_lib("xmpp/include/xmpp.hrl").
+
 -callback terminate(Host :: host(), ServerHost :: binary()) -> atom().
 
 -callback options() -> nodeOptions().
 
 -callback set_node(PubsubNode :: pubsubNode()) ->
-    ok | {result, NodeIdx::nodeIdx()} | {error, xmlel()}.
+    ok | {result, NodeIdx::nodeIdx()} | {error, stanza_error()}.
 
 -callback get_node(Host   :: host(),
 	NodeId :: nodeId(),
-	From   :: jid()) ->
+	From   :: jid:jid()) ->
     pubsubNode() |
-    {error, xmlel()}.
+    {error, stanza_error()}.
 
 -callback get_node(Host :: host(),
 	NodeId :: nodeId()) ->
     pubsubNode() |
-    {error, xmlel()}.
+    {error, stanza_error()}.
 
 -callback get_node(NodeIdx :: nodeIdx()) ->
     pubsubNode() |
-    {error, xmlel()}.
+    {error, stanza_error()}.
 
 -callback get_nodes(Host :: host(),
-	From :: jid())->
+		    Limit :: non_neg_integer() | infinity)->
     [pubsubNode()].
 
 -callback get_nodes(Host :: host())->
     [pubsubNode()].
 
+-callback get_all_nodes(Host :: host()) ->
+    [pubsubNode()].
+
 -callback get_parentnodes(Host :: host(),
 	NodeId :: nodeId(),
-	From :: jid()) ->
+	From :: jid:jid()) ->
     [pubsubNode()] |
-    {error, xmlel()}.
+    {error, stanza_error()}.
 
 -callback get_parentnodes_tree(Host :: host(),
 	NodeId :: nodeId(),
-	From :: jid()) ->
+	From :: jid:jid()) ->
     [{0, [pubsubNode(),...]}].
 
 -callback get_subnodes(Host :: host(),
-	NodeId :: nodeId(),
-	From :: jid()) ->
+		       NodeId :: nodeId(),
+		       Limit :: non_neg_integer() | infinity) ->
     [pubsubNode()].
 
 -callback get_subnodes_tree(Host :: host(),
 	NodeId :: nodeId(),
-	From :: jid()) ->
+	From :: jid:jid()) ->
     [pubsubNode()].
 
 -callback create_node(Host :: host(),
 	NodeId :: nodeId(),
 	Type :: binary(),
-	Owner :: jid(),
+	Owner :: jid:jid(),
 	Options :: nodeOptions(),
 	Parents :: [nodeId()]) ->
     {ok, NodeIdx::nodeIdx()} |
-    {error, xmlel()} |
-    {error, {virtual, {host(), nodeId()}}}.
+    {error, stanza_error()} |
+    {error, {virtual, {host(), nodeId()} | nodeId()}}.
 
 -callback delete_node(Host :: host(),
 	NodeId :: nodeId()) ->

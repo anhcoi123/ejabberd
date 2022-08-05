@@ -1,40 +1,33 @@
-%%% ====================================================================
-%%% ``The contents of this file are subject to the Erlang Public License,
-%%% Version 1.1, (the "License"); you may not use this file except in
-%%% compliance with the License. You should have received a copy of the
-%%% Erlang Public License along with this software. If not, it can be
-%%% retrieved via the world wide web at http://www.erlang.org/.
-%%% 
+%%%----------------------------------------------------------------------
 %%%
-%%% Software distributed under the License is distributed on an "AS IS"
-%%% basis, WITHOUT WARRANTY OF ANY KIND, either express or implied. See
-%%% the License for the specific language governing rights and limitations
-%%% under the License.
-%%% 
+%%% ejabberd, Copyright (C) 2002-2022   ProcessOne
 %%%
-%%% The Initial Developer of the Original Code is ProcessOne.
-%%% Portions created by ProcessOne are Copyright 2006-2015, ProcessOne
-%%% All Rights Reserved.''
-%%% This software is copyright 2006-2015, ProcessOne.
+%%% This program is free software; you can redistribute it and/or
+%%% modify it under the terms of the GNU General Public License as
+%%% published by the Free Software Foundation; either version 2 of the
+%%% License, or (at your option) any later version.
 %%%
+%%% This program is distributed in the hope that it will be useful,
+%%% but WITHOUT ANY WARRANTY; without even the implied warranty of
+%%% MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+%%% General Public License for more details.
 %%%
-%%% copyright 2006-2015 ProcessOne
+%%% You should have received a copy of the GNU General Public License along
+%%% with this program; if not, write to the Free Software Foundation, Inc.,
+%%% 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 %%%
-%%% This file contains pubsub types definition.
-%%% ====================================================================
-
--include("ejabberd.hrl").
+%%%----------------------------------------------------------------------
 
 %% -------------------------------
 %% Pubsub constants
 -define(ERR_EXTENDED(E, C), mod_pubsub:extended_error(E, C)).
 
 %% The actual limit can be configured with mod_pubsub's option max_items_node
--define(MAXITEMS, 10).
+-define(MAXITEMS, 1000).
 
 %% this is currently a hard limit.
-%% Would be nice to have it configurable. 
--define(MAX_PAYLOAD_SIZE, 60000).
+%% Would be nice to have it configurable.
+-define(MAX_PAYLOAD_SIZE, 250000).
 
 %% -------------------------------
 %% Pubsub types
@@ -65,7 +58,7 @@
 %% note: pos_integer() should always be used, but we allow anything else coded
 %% as binary, so one can have a custom implementation of nodetree with custom
 %% indexing (see nodetree_virtual). this also allows to use any kind of key for
-%% indexing nodes, as this can be usefull with external backends such as odbc.
+%% indexing nodes, as this can be useful with external backends such as sql.
 
 -type(itemId() :: binary()).
 %% @type itemId() = string().
@@ -91,9 +84,14 @@
      Value::binary() | [binary()] | boolean()
 }).
 
--type(subOptions() :: [mod_pubsub:subOption(),...]).
+-type(subOptions() :: [mod_pubsub:subOption()]).
 
+-type(pubOption() ::
+    {Option::binary(),
+     Values::[binary()]
+}).
 
+-type(pubOptions() :: [mod_pubsub:pubOption()]).
 
 -type(affiliation() :: 'none'
                      | 'owner'
@@ -103,13 +101,6 @@
                      | 'outcast'
 ).
 %% @type affiliation() = 'none' | 'owner' | 'publisher' | 'publish-only' | 'member' | 'outcast'.
-
--type(subscription() :: 'none'
-                      | 'pending'
-                      | 'unconfigured'
-                      | 'subscribed'
-).
-%% @type subscription() = 'none' | 'pending' | 'unconfigured' | 'subscribed'.
 
 -type(accessModel() :: 'open'
                      | 'presence'
@@ -138,13 +129,14 @@
     id                  ,% :: mod_pubsub:nodeIdx(),
     parents = []        ,% :: [mod_pubsub:nodeId(),...],
     type    = <<"flat">>,% :: binary(),
-    owners  = []        ,% :: [jlib:ljid(),...],
+    owners  = []        ,% :: [jid:ljid(),...],
     options = []        % :: mod_pubsub:nodeOptions()
 }).
 
 -record(pubsub_state,
 {
-    stateid               ,% :: {jlib:ljid(), mod_pubsub:nodeIdx()},
+    stateid               ,% :: {jid:ljid(), mod_pubsub:nodeIdx()},
+    nodeidx               ,% :: mod_pubsub:nodeIdx(),
     items         = []    ,% :: [mod_pubsub:itemId(),...],
     affiliation   = 'none',% :: mod_pubsub:affiliation(),
     subscriptions = []    % :: [{mod_pubsub:subscription(), mod_pubsub:subId()}]
@@ -153,8 +145,9 @@
 -record(pubsub_item,
 {
     itemid                           ,% :: {mod_pubsub:itemId(), mod_pubsub:nodeIdx()},
-    creation     = {unknown, unknown},% :: {erlang:timestamp(), jlib:ljid()},
-    modification = {unknown, unknown},% :: {erlang:timestamp(), jlib:ljid()},
+    nodeidx                          ,% :: mod_pubsub:nodeIdx(),
+    creation     = {unknown, unknown},% :: {erlang:timestamp(), jid:ljid()},
+    modification = {unknown, unknown},% :: {erlang:timestamp(), jid:ljid()},
     payload      = []                % :: mod_pubsub:payload()
 }).
 
@@ -166,8 +159,14 @@
 
 -record(pubsub_last_item,
 {
-    nodeid   ,% :: mod_pubsub:nodeIdx(),
+    nodeid   ,% :: {binary(), mod_pubsub:nodeIdx()},
     itemid   ,% :: mod_pubsub:itemId(),
-    creation ,% :: {erlang:timestamp(), jlib:ljid()},
+    creation ,% :: {erlang:timestamp(), jid:ljid()},
     payload  % :: mod_pubsub:payload()
+}).
+
+-record(pubsub_orphan,
+{
+    nodeid    ,% :: mod_pubsub:nodeIdx(),
+    items = [] % :: list()
 }).

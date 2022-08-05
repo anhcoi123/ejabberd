@@ -6,7 +6,7 @@
 %%% Created : 28 Feb 2004 by Alexey Shchepin <alexey@process-one.net>
 %%%
 %%%
-%%% ejabberd, Copyright (C) 2002-2015   ProcessOne
+%%% ejabberd, Copyright (C) 2002-2022   ProcessOne
 %%%
 %%% This program is free software; you can redistribute it and/or
 %%% modify it under the terms of the GNU General Public License as
@@ -31,10 +31,9 @@
 %% External exports
 -export([make_xhtml/1, make_xhtml/2, error/1]).
 
--include("ejabberd.hrl").
 -include("logger.hrl").
 
--include("jlib.hrl").
+-include_lib("xmpp/include/xmpp.hrl").
 
 -include("ejabberd_http.hrl").
 

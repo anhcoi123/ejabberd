@@ -5,7 +5,7 @@
 %%% Created : 31 Jan 2003 by Alexey Shchepin <alexey@process-one.net>
 %%%
 %%%
-%%% ejabberd, Copyright (C) 2002-2015   ProcessOne
+%%% ejabberd, Copyright (C) 2002-2022   ProcessOne
 %%%
 %%% This program is free software; you can redistribute it and/or
 %%% modify it under the terms of the GNU General Public License as
@@ -24,160 +24,97 @@
 %%%----------------------------------------------------------------------
 
 -module(ejabberd_app).
+
 -author('alexey@process-one.net').
 
 -behaviour(application).
 
--export([start_modules/0,start/2, prep_stop/1, stop/1, init/0]).
+-export([start/2, prep_stop/1, stop/1]).
 
--include("ejabberd.hrl").
 -include("logger.hrl").
+-include("ejabberd_stacktrace.hrl").
 
 %%%
 %%% Application API
 %%%
 
 start(normal, _Args) ->
-    ejabberd_logger:start(),
-    write_pid_file(),
-    start_apps(),
-    ejabberd:check_app(ejabberd),
-    randoms:start(),
-    db_init(),
-    start(),
-    translate:start(),
-    ejabberd_ctl:init(),
-    ejabberd_commands:init(),
-    ejabberd_admin:start(),
-    gen_mod:start(),
-    ejabberd_config:start(),
-    set_loglevel_from_config(),
-    acl:start(),
-    shaper:start(),
-    connect_nodes(),
-    Sup = ejabberd_sup:start_link(),
-    ejabberd_rdbms:start(),
-    ejabberd_riak_sup:start(),
-    ejabberd_sm:start(),
-    ejabberd_auth:start(),
-    cyrsasl:start(),
-    % Profiling
-    %ejabberd_debug:eprof_start(),
-    %ejabberd_debug:fprof_start(),
-    maybe_add_nameservers(),
-    ext_mod:start(),
-    start_modules(),
-    ejabberd_listener:start_listeners(),
-    ?INFO_MSG("ejabberd ~s is started in the node ~p", [?VERSION, node()]),
-    Sup;
+    try
+	{T1, _} = statistics(wall_clock),
+	ejabberd_logger:start(),
+	write_pid_file(),
+	start_included_apps(),
+	start_elixir_application(),
+	setup_if_elixir_conf_used(),
+	case ejabberd_config:load() of
+	    ok ->
+		ejabberd_mnesia:start(),
+		file_queue_init(),
+		maybe_add_nameservers(),
+		case ejabberd_sup:start_link() of
+		    {ok, SupPid} ->
+			ejabberd_system_monitor:start(),
+			register_elixir_config_hooks(),
+			ejabberd_cluster:wait_for_sync(infinity),
+			ejabberd_hooks:run(ejabberd_started, []),
+			ejabberd:check_apps(),
+			ejabberd_systemd:ready(),
+			{T2, _} = statistics(wall_clock),
+			?INFO_MSG("ejabberd ~ts is started in the node ~p in ~.2fs",
+				  [ejabberd_option:version(),
+				   node(), (T2-T1)/1000]),
+			{ok, SupPid};
+		    Err ->
+			?CRITICAL_MSG("Failed to start ejabberd application: ~p", [Err]),
+			ejabberd:halt()
+		end;
+	    Err ->
+		?CRITICAL_MSG("Failed to start ejabberd application: ~ts",
+			      [ejabberd_config:format_error(Err)]),
+		ejabberd:halt()
+	end
+    catch throw:{?MODULE, Error} ->
+	    ?DEBUG("Failed to start ejabberd application: ~p", [Error]),
+	    ejabberd:halt()
+    end;
 start(_, _) ->
     {error, badarg}.
+
+start_included_apps() ->
+    {ok, Apps} = application:get_key(ejabberd, included_applications),
+    lists:foreach(
+	fun(mnesia) ->
+	       ok;
+	   (lager) ->
+		ok;
+	   (os_mon)->
+	       ok;
+	   (App) ->
+	       application:ensure_all_started(App)
+	end, Apps).
 
 %% Prepare the application for termination.
 %% This function is called when an application is about to be stopped,
 %% before shutting down the processes of the application.
 prep_stop(State) ->
-    ejabberd_listener:stop_listeners(),
-    stop_modules(),
-    ejabberd_admin:stop(),
-    broadcast_c2s_shutdown(),
-    timer:sleep(5000),
+    ejabberd_systemd:stopping(),
+    ejabberd_hooks:run(ejabberd_stopping, []),
+    ejabberd_listener:stop(),
+    ejabberd_sm:stop(),
+    ejabberd_service:stop(),
+    ejabberd_s2s:stop(),
+    gen_mod:stop(),
     State.
 
 %% All the processes were killed when this function is called
 stop(_State) ->
-    ?INFO_MSG("ejabberd ~s is stopped in the node ~p", [?VERSION, node()]),
-    delete_pid_file(),
-    %%ejabberd_debug:stop(),
-    ok.
-
+    ?INFO_MSG("ejabberd ~ts is stopped in the node ~p",
+	      [ejabberd_option:version(), node()]),
+    delete_pid_file().
 
 %%%
 %%% Internal functions
 %%%
-
-start() ->
-    spawn_link(?MODULE, init, []).
-
-init() ->
-    register(ejabberd, self()),
-    loop().
-
-loop() ->
-    receive
-	_ ->
-	    loop()
-    end.
-
-db_init() ->
-    ejabberd_config:env_binary_to_list(mnesia, dir),
-    MyNode = node(),
-    DbNodes = mnesia:system_info(db_nodes),
-    case lists:member(MyNode, DbNodes) of
-	true ->
-	    ok;
-	false ->
-	    ?CRITICAL_MSG("Node name mismatch: I'm [~s], "
-			  "the database is owned by ~p", [MyNode, DbNodes]),
-	    ?CRITICAL_MSG("Either set ERLANG_NODE in ejabberdctl.cfg "
-			  "or change node name in Mnesia", []),
-	    erlang:error(node_name_mismatch)
-    end,
-    case mnesia:system_info(extra_db_nodes) of
-	[] ->
-	    mnesia:create_schema([node()]);
-	_ ->
-	    ok
-    end,
-    ejabberd:start_app(mnesia, permanent),
-    mnesia:wait_for_tables(mnesia:system_info(local_tables), infinity).
-
-%% Start all the modules in all the hosts
-start_modules() ->
-    lists:foreach(
-      fun(Host) ->
-              Modules = ejabberd_config:get_option(
-                          {modules, Host},
-                          fun(Mods) ->
-                                  lists:map(
-                                    fun({M, A}) when is_atom(M), is_list(A) ->
-                                            {M, A}
-                                    end, Mods)
-                          end, []),
-              lists:foreach(
-                fun({Module, Args}) ->
-                        gen_mod:start_module(Host, Module, Args)
-                end, Modules)
-      end, ?MYHOSTS).
-
-%% Stop all the modules in all the hosts
-stop_modules() ->
-    lists:foreach(
-      fun(Host) ->
-              Modules = ejabberd_config:get_option(
-                          {modules, Host},
-                          fun(Mods) ->
-                                  lists:map(
-                                    fun({M, A}) when is_atom(M), is_list(A) ->
-                                            {M, A}
-                                    end, Mods)
-                          end, []),
-              lists:foreach(
-                fun({Module, _Args}) ->
-                        gen_mod:stop_module_keep_config(Host, Module)
-                end, Modules)
-      end, ?MYHOSTS).
-
-connect_nodes() ->
-    Nodes = ejabberd_config:get_option(
-              cluster_nodes,
-              fun(Ns) ->
-                      true = lists:all(fun is_atom/1, Ns),
-                      Ns
-              end, []),
-    lists:foreach(fun(Node) ->
-                          net_kernel:connect_node(Node)
-                  end, Nodes).
 
 %% If ejabberd is running on some Windows machine, get nameservers and add to Erlang
 maybe_add_nameservers() ->
@@ -190,16 +127,6 @@ add_windows_nameservers() ->
     IPTs = win32_dns:get_nameservers(),
     ?INFO_MSG("Adding machine's DNS IPs to Erlang system:~n~p", [IPTs]),
     lists:foreach(fun(IPT) -> inet_db:add_ns(IPT) end, IPTs).
-
-
-broadcast_c2s_shutdown() ->
-    Children = ejabberd_sm:get_all_pids(),
-    lists:foreach(
-      fun(C2SPid) when node(C2SPid) == node() ->
-	      C2SPid ! system_shutdown;
-	 (_) ->
-	      ok
-      end, Children).
 
 %%%
 %%% PID file
@@ -214,13 +141,13 @@ write_pid_file() ->
     end.
 
 write_pid_file(Pid, PidFilename) ->
-    case file:open(PidFilename, [write]) of
-	{ok, Fd} ->
-	    io:format(Fd, "~s~n", [Pid]),
-	    file:close(Fd);
-	{error, Reason} ->
-	    ?ERROR_MSG("Cannot write PID file ~s~nReason: ~p", [PidFilename, Reason]),
-	    throw({cannot_write_pid_file, PidFilename, Reason})
+    case file:write_file(PidFilename, io_lib:format("~ts~n", [Pid])) of
+	ok ->
+	    ok;
+	{error, Reason} = Err ->
+	    ?CRITICAL_MSG("Cannot write PID file ~ts: ~ts",
+			  [PidFilename, file:format_error(Reason)]),
+	    throw({?MODULE, Err})
     end.
 
 delete_pid_file() ->
@@ -231,20 +158,43 @@ delete_pid_file() ->
 	    file:delete(PidFilename)
     end.
 
-set_loglevel_from_config() ->
-    Level = ejabberd_config:get_option(
-              loglevel,
-              fun(P) when P>=0, P=<5 -> P end,
-              4),
-    ejabberd_logger:set(Level).
+file_queue_init() ->
+    QueueDir = case ejabberd_option:queue_dir() of
+		   undefined ->
+		       MnesiaDir = mnesia:system_info(directory),
+		       filename:join(MnesiaDir, "queue");
+		   Path ->
+		       Path
+	       end,
+    case p1_queue:start(QueueDir) of
+	ok -> ok;
+	Err -> throw({?MODULE, Err})
+    end.
 
-start_apps() ->
-    crypto:start(),
-    ejabberd:start_app(sasl),
-    ejabberd:start_app(ssl),
-    ejabberd:start_app(p1_yaml),
-    ejabberd:start_app(p1_tls),
-    ejabberd:start_app(p1_xml),
-    ejabberd:start_app(p1_stringprep),
-    ejabberd:start_app(p1_zlib),
-    ejabberd:start_app(p1_cache_tab).
+-ifdef(ELIXIR_ENABLED).
+is_using_elixir_config() ->
+    Config = ejabberd_config:path(),
+    'Elixir.Ejabberd.ConfigUtil':is_elixir_config(Config).
+
+setup_if_elixir_conf_used() ->
+  case is_using_elixir_config() of
+    true -> 'Elixir.Ejabberd.Config.Store':start_link();
+    false -> ok
+  end.
+
+register_elixir_config_hooks() ->
+  case is_using_elixir_config() of
+    true -> 'Elixir.Ejabberd.Config':start_hooks();
+    false -> ok
+  end.
+
+start_elixir_application() ->
+    case application:ensure_started(elixir) of
+	ok -> ok;
+	{error, _Msg} -> ?ERROR_MSG("Elixir application not started.", [])
+    end.
+-else.
+setup_if_elixir_conf_used() -> ok.
+register_elixir_config_hooks() -> ok.
+start_elixir_application() -> ok.
+-endif.

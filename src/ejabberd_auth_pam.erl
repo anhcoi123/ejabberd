@@ -5,7 +5,7 @@
 %%% Created : 5 Jul 2007 by Evgeniy Khramtsov <xram@jabber.ru>
 %%%
 %%%
-%%% ejabberd, Copyright (C) 2002-2015   ProcessOne
+%%% ejabberd, Copyright (C) 2002-2022   ProcessOne
 %%%
 %%% This program is free software; you can redistribute it and/or
 %%% modify it under the terms of the GNU General Public License as
@@ -28,93 +28,52 @@
 
 -behaviour(ejabberd_auth).
 
-%% External exports
-%%====================================================================
-%% API
-%%====================================================================
--export([start/1, set_password/3, check_password/3,
-	 check_password/5, try_register/3,
-	 dirty_get_registered_users/0, get_vh_registered_users/1,
-         get_vh_registered_users/2, get_vh_registered_users_number/1,
-         get_vh_registered_users_number/2,
-	 get_password/2, get_password_s/2, is_user_exists/2,
-	 remove_user/2, remove_user/3, store_type/0,
-	 plain_password_required/0]).
+-export([start/1, stop/1, check_password/4,
+	 user_exists/2, store_type/1, plain_password_required/1]).
 
 start(_Host) ->
-    ejabberd:start_app(p1_pam).
+    ejabberd:start_app(epam).
 
-set_password(_User, _Server, _Password) ->
-    {error, not_allowed}.
+stop(_Host) ->
+    ok.
 
-check_password(User, Server, Password, _Digest,
-	       _DigestGen) ->
-    check_password(User, Server, Password).
-
-check_password(User, Host, Password) ->
-    Service = get_pam_service(Host),
-    UserInfo = case get_pam_userinfotype(Host) of
-		 username -> User;
-		 jid -> <<User/binary, "@", Host/binary>>
-	       end,
-    case catch epam:authenticate(Service, UserInfo,
-				 Password)
-	of
-      true -> true;
-      _ -> false
+check_password(User, AuthzId, Host, Password) ->
+    if AuthzId /= <<>> andalso AuthzId /= User ->
+	    false;
+       true ->
+	    Service = get_pam_service(Host),
+	    UserInfo = case get_pam_userinfotype(Host) of
+			   username -> User;
+			   jid -> <<User/binary, "@", Host/binary>>
+		       end,
+	    case catch epam:authenticate(Service, UserInfo, Password) of
+		true -> {cache, true};
+		false -> {cache, false};
+		_ -> {nocache, false}
+	    end
     end.
 
-try_register(_User, _Server, _Password) ->
-    {error, not_allowed}.
-
-dirty_get_registered_users() -> [].
-
-get_vh_registered_users(_Host) -> [].
-
-get_vh_registered_users(_Host, _) -> [].
-
-get_vh_registered_users_number(_Host) -> 0.
-
-get_vh_registered_users_number(_Host, _) -> 0.
-
-get_password(_User, _Server) -> false.
-
-get_password_s(_User, _Server) -> <<"">>.
-
-%% @spec (User, Server) -> true | false | {error, Error}
-%% TODO: Improve this function to return an error instead of 'false' when connection to PAM failed
-is_user_exists(User, Host) ->
+user_exists(User, Host) ->
     Service = get_pam_service(Host),
     UserInfo = case get_pam_userinfotype(Host) of
 		 username -> User;
 		 jid -> <<User/binary, "@", Host/binary>>
 	       end,
     case catch epam:acct_mgmt(Service, UserInfo) of
-      true -> true;
-      _ -> false
+	true -> {cache, true};
+	false -> {cache, false};
+	_Err -> {nocache, {error, db_failure}}
     end.
 
-remove_user(_User, _Server) -> {error, not_allowed}.
+plain_password_required(_) -> true.
 
-remove_user(_User, _Server, _Password) -> not_allowed.
-
-plain_password_required() -> true.
-
-store_type() -> external.
+store_type(_) -> external.
 
 %%====================================================================
 %% Internal functions
 %%====================================================================
 get_pam_service(Host) ->
-    ejabberd_config:get_option(
-      {pam_service, Host},
-      fun iolist_to_binary/1,
-      <<"ejabberd">>).
+    ejabberd_option:pam_service(Host).
 
 get_pam_userinfotype(Host) ->
-    ejabberd_config:get_option(
-      {pam_userinfotype, Host},
-      fun(username) -> username;
-         (jid) -> jid
-      end,
-      username).
+    ejabberd_option:pam_userinfotype(Host).

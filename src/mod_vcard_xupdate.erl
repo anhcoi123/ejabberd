@@ -3,231 +3,251 @@
 %%% Author  : Igor Goryachev <igor@goryachev.org>
 %%% Purpose : Add avatar hash in presence on behalf of client (XEP-0153)
 %%% Created : 9 Mar 2007 by Igor Goryachev <igor@goryachev.org>
+%%%
+%%%
+%%% ejabberd, Copyright (C) 2002-2022   ProcessOne
+%%%
+%%% This program is free software; you can redistribute it and/or
+%%% modify it under the terms of the GNU General Public License as
+%%% published by the Free Software Foundation; either version 2 of the
+%%% License, or (at your option) any later version.
+%%%
+%%% This program is distributed in the hope that it will be useful,
+%%% but WITHOUT ANY WARRANTY; without even the implied warranty of
+%%% MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+%%% General Public License for more details.
+%%%
+%%% You should have received a copy of the GNU General Public License along
+%%% with this program; if not, write to the Free Software Foundation, Inc.,
+%%% 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+%%%
 %%%----------------------------------------------------------------------
 
 -module(mod_vcard_xupdate).
-
 -behaviour(gen_mod).
 
+-protocol({xep, 398, '0.2.0'}).
+
 %% gen_mod callbacks
--export([start/2, stop/1]).
+-export([start/2, stop/1, reload/3]).
 
-%% hooks
--export([update_presence/3, vcard_set/3, export/1, import/1, import/3]).
+-export([update_presence/1, vcard_set/1, remove_user/2, mod_doc/0,
+	 user_send_packet/1, mod_opt_type/1, mod_options/1, depends/2]).
+%% API
+-export([compute_hash/1]).
 
--include("ejabberd.hrl").
 -include("logger.hrl").
+-include_lib("xmpp/include/xmpp.hrl").
+-include("translate.hrl").
 
--include("jlib.hrl").
-
--record(vcard_xupdate, {us = {<<>>, <<>>} :: {binary(), binary()},
-                        hash = <<>>       :: binary()}).
+-define(VCARD_XUPDATE_CACHE, vcard_xupdate_cache).
 
 %%====================================================================
 %% gen_mod callbacks
 %%====================================================================
 
 start(Host, Opts) ->
-    case gen_mod:db_type(Host, Opts) of
-      mnesia ->
-	  mnesia:create_table(vcard_xupdate,
-			      [{disc_copies, [node()]},
-			       {attributes,
-				record_info(fields, vcard_xupdate)}]),
-          update_table();
-      _ -> ok
-    end,
-    ejabberd_hooks:add(c2s_update_presence, Host, ?MODULE,
+    init_cache(Host, Opts),
+    ejabberd_hooks:add(c2s_self_presence, Host, ?MODULE,
 		       update_presence, 100),
-    ejabberd_hooks:add(vcard_set, Host, ?MODULE, vcard_set,
-		       100),
-    ok.
+    ejabberd_hooks:add(user_send_packet, Host, ?MODULE,
+		       user_send_packet, 50),
+    ejabberd_hooks:add(vcard_iq_set, Host, ?MODULE, vcard_set,
+		       90),
+    ejabberd_hooks:add(remove_user, Host, ?MODULE, remove_user, 50).
 
 stop(Host) ->
-    ejabberd_hooks:delete(c2s_update_presence, Host,
+    ejabberd_hooks:delete(c2s_self_presence, Host,
 			  ?MODULE, update_presence, 100),
-    ejabberd_hooks:delete(vcard_set, Host, ?MODULE,
-			  vcard_set, 100),
-    ok.
+    ejabberd_hooks:delete(user_send_packet, Host, ?MODULE,
+			  user_send_packet, 50),
+    ejabberd_hooks:delete(vcard_iq_set, Host, ?MODULE,
+			  vcard_set, 90),
+    ejabberd_hooks:delete(remove_user, Host, ?MODULE, remove_user, 50).
+
+reload(Host, NewOpts, _OldOpts) ->
+    init_cache(Host, NewOpts).
+
+depends(_Host, _Opts) ->
+    [{mod_vcard, hard}].
 
 %%====================================================================
 %% Hooks
 %%====================================================================
-
-update_presence(#xmlel{name = <<"presence">>, attrs = Attrs} = Packet,
-  User, Host) ->
-    case xml:get_attr_s(<<"type">>, Attrs) of
-      <<>> -> presence_with_xupdate(Packet, User, Host);
-      _ -> Packet
+-spec update_presence({presence(), ejabberd_c2s:state()})
+      -> {presence(), ejabberd_c2s:state()}.
+update_presence({#presence{type = available} = Pres,
+		 #{jid := #jid{luser = LUser, lserver = LServer}} = State}) ->
+    case xmpp:get_subtag(Pres, #vcard_xupdate{}) of
+	#vcard_xupdate{hash = <<>>} ->
+	    %% XEP-0398 forbids overwriting vcard:x:update
+	    %% tags with empty <photo/> element
+	    {Pres, State};
+	_ ->
+	    Pres1 = case get_xupdate(LUser, LServer) of
+			undefined -> xmpp:remove_subtag(Pres, #vcard_xupdate{});
+			XUpdate -> xmpp:set_subtag(Pres, XUpdate)
+		    end,
+	    {Pres1, State}
     end;
-update_presence(Packet, _User, _Host) -> Packet.
+update_presence(Acc) ->
+    Acc.
 
-vcard_set(LUser, LServer, VCARD) ->
-    US = {LUser, LServer},
-    case xml:get_path_s(VCARD,
-			[{elem, <<"PHOTO">>}, {elem, <<"BINVAL">>}, cdata])
-	of
-      <<>> -> remove_xupdate(LUser, LServer);
-      BinVal ->
-	  add_xupdate(LUser, LServer,
-		      p1_sha:sha(jlib:decode_base64(BinVal)))
-    end,
-    ejabberd_sm:force_update_presence(US).
+-spec user_send_packet({presence(), ejabberd_c2s:state()})
+      -> {presence(), ejabberd_c2s:state()}.
+user_send_packet({#presence{type = available,
+			    to = #jid{luser = U, lserver = S,
+				      lresource = <<"">>}},
+		  #{jid := #jid{luser = U, lserver = S}}} = Acc) ->
+    %% This is processed by update_presence/2 explicitly, we don't
+    %% want to call this multiple times for performance reasons
+    Acc;
+user_send_packet(Acc) ->
+    update_presence(Acc).
+
+-spec vcard_set(iq()) -> iq().
+vcard_set(#iq{from = #jid{luser = LUser, lserver = LServer}} = IQ) ->
+    ets_cache:delete(?VCARD_XUPDATE_CACHE, {LUser, LServer}),
+    ejabberd_sm:force_update_presence({LUser, LServer}),
+    IQ;
+vcard_set(Acc) ->
+    Acc.
+
+-spec remove_user(binary(), binary()) -> ok.
+remove_user(User, Server) ->
+    LUser = jid:nodeprep(User),
+    LServer = jid:nameprep(Server),
+    ets_cache:delete(?VCARD_XUPDATE_CACHE, {LUser, LServer}).
 
 %%====================================================================
 %% Storage
 %%====================================================================
-
-add_xupdate(LUser, LServer, Hash) ->
-    add_xupdate(LUser, LServer, Hash,
-		gen_mod:db_type(LServer, ?MODULE)).
-
-add_xupdate(LUser, LServer, Hash, mnesia) ->
-    F = fun () ->
-		mnesia:write(#vcard_xupdate{us = {LUser, LServer},
-					    hash = Hash})
-	end,
-    mnesia:transaction(F);
-add_xupdate(LUser, LServer, Hash, riak) ->
-    {atomic, ejabberd_riak:put(#vcard_xupdate{us = {LUser, LServer},
-                                              hash = Hash},
-			       vcard_xupdate_schema())};
-add_xupdate(LUser, LServer, Hash, odbc) ->
-    Username = ejabberd_odbc:escape(LUser),
-    SHash = ejabberd_odbc:escape(Hash),
-    F = fun () ->
-		odbc_queries:update_t(<<"vcard_xupdate">>,
-				      [<<"username">>, <<"hash">>],
-				      [Username, SHash],
-				      [<<"username='">>, Username, <<"'">>])
-	end,
-    ejabberd_odbc:sql_transaction(LServer, F).
-
+-spec get_xupdate(binary(), binary()) -> vcard_xupdate() | undefined.
 get_xupdate(LUser, LServer) ->
-    get_xupdate(LUser, LServer,
-		gen_mod:db_type(LServer, ?MODULE)).
-
-get_xupdate(LUser, LServer, mnesia) ->
-    case mnesia:dirty_read(vcard_xupdate, {LUser, LServer})
-	of
-      [#vcard_xupdate{hash = Hash}] -> Hash;
-      _ -> undefined
-    end;
-get_xupdate(LUser, LServer, riak) ->
-    case ejabberd_riak:get(vcard_xupdate, vcard_xupdate_schema(),
-			   {LUser, LServer}) of
-        {ok, #vcard_xupdate{hash = Hash}} -> Hash;
-        _ -> undefined
-    end;
-get_xupdate(LUser, LServer, odbc) ->
-    Username = ejabberd_odbc:escape(LUser),
-    case ejabberd_odbc:sql_query(LServer,
-				 [<<"select hash from vcard_xupdate where "
-				    "username='">>,
-				  Username, <<"';">>])
-	of
-      {selected, [<<"hash">>], [[Hash]]} -> Hash;
-      _ -> undefined
+    Result = case use_cache(LServer) of
+		 true ->
+		     ets_cache:lookup(
+		       ?VCARD_XUPDATE_CACHE, {LUser, LServer},
+		       fun() -> db_get_xupdate(LUser, LServer) end);
+		 false ->
+		     db_get_xupdate(LUser, LServer)
+	     end,
+    case Result of
+	{ok, external} -> undefined;
+	{ok, Hash} -> #vcard_xupdate{hash = Hash};
+	error -> #vcard_xupdate{}
     end.
 
-remove_xupdate(LUser, LServer) ->
-    remove_xupdate(LUser, LServer,
-		   gen_mod:db_type(LServer, ?MODULE)).
-
-remove_xupdate(LUser, LServer, mnesia) ->
-    F = fun () ->
-		mnesia:delete({vcard_xupdate, {LUser, LServer}})
-	end,
-    mnesia:transaction(F);
-remove_xupdate(LUser, LServer, riak) ->
-    {atomic, ejabberd_riak:delete(vcard_xupdate, {LUser, LServer})};
-remove_xupdate(LUser, LServer, odbc) ->
-    Username = ejabberd_odbc:escape(LUser),
-    F = fun () ->
-		ejabberd_odbc:sql_query_t([<<"delete from vcard_xupdate where username='">>,
-					   Username, <<"';">>])
-	end,
-    ejabberd_odbc:sql_transaction(LServer, F).
-
-%%%----------------------------------------------------------------------
-%%% Presence stanza rebuilding
-%%%----------------------------------------------------------------------
-
-presence_with_xupdate(#xmlel{name = <<"presence">>,
-			     attrs = Attrs, children = Els},
-		      User, Host) ->
-    XPhotoEl = build_xphotoel(User, Host),
-    Els2 = presence_with_xupdate2(Els, [], XPhotoEl),
-    #xmlel{name = <<"presence">>, attrs = Attrs,
-	   children = Els2}.
-
-presence_with_xupdate2([], Els2, XPhotoEl) ->
-    lists:reverse([XPhotoEl | Els2]);
-%% This clause assumes that the x element contains only the XMLNS attribute:
-presence_with_xupdate2([#xmlel{name = <<"x">>,
-			       attrs = [{<<"xmlns">>, ?NS_VCARD_UPDATE}]}
-			| Els],
-		       Els2, XPhotoEl) ->
-    presence_with_xupdate2(Els, Els2, XPhotoEl);
-presence_with_xupdate2([El | Els], Els2, XPhotoEl) ->
-    presence_with_xupdate2(Els, [El | Els2], XPhotoEl).
-
-build_xphotoel(User, Host) ->
-    Hash = get_xupdate(User, Host),
-    PhotoSubEls = case Hash of
-		    Hash when is_binary(Hash) -> [{xmlcdata, Hash}];
-		    _ -> []
-		  end,
-    PhotoEl = [#xmlel{name = <<"photo">>, attrs = [],
-		      children = PhotoSubEls}],
-    #xmlel{name = <<"x">>,
-	   attrs = [{<<"xmlns">>, ?NS_VCARD_UPDATE}],
-	   children = PhotoEl}.
-
-vcard_xupdate_schema() ->
-    {record_info(fields, vcard_xupdate), #vcard_xupdate{}}.
-
-update_table() ->
-    Fields = record_info(fields, vcard_xupdate),
-    case mnesia:table_info(vcard_xupdate, attributes) of
-      Fields ->
-            ejabberd_config:convert_table_to_binary(
-              vcard_xupdate, Fields, set,
-              fun(#vcard_xupdate{us = {U, _}}) -> U end,
-              fun(#vcard_xupdate{us = {U, S}, hash = Hash} = R) ->
-                      R#vcard_xupdate{us = {iolist_to_binary(U),
-                                            iolist_to_binary(S)},
-                                      hash = iolist_to_binary(Hash)}
-              end);
-        _ ->            
-            ?INFO_MSG("Recreating vcard_xupdate table", []),
-            mnesia:transform_table(vcard_xupdate, ignore, Fields)
+-spec db_get_xupdate(binary(), binary()) -> {ok, binary() | external} | error.
+db_get_xupdate(LUser, LServer) ->
+    case mod_vcard:get_vcard(LUser, LServer) of
+	[VCard] ->
+	    {ok, compute_hash(VCard)};
+	_ ->
+	    error
     end.
 
-export(_Server) ->
-    [{vcard_xupdate,
-      fun(Host, #vcard_xupdate{us = {LUser, LServer}, hash = Hash})
-            when LServer == Host ->
-              Username = ejabberd_odbc:escape(LUser),
-              SHash = ejabberd_odbc:escape(Hash),
-              [[<<"delete from vcard_xupdate where username='">>,
-                Username, <<"';">>],
-               [<<"insert into vcard_xupdate(username, "
-                  "hash) values ('">>,
-                Username, <<"', '">>, SHash, <<"');">>]];
-         (_Host, _R) ->
-              []
-      end}].
+-spec init_cache(binary(), gen_mod:opts()) -> ok.
+init_cache(Host, Opts) ->
+    case use_cache(Host) of
+	true ->
+	    CacheOpts = cache_opts(Opts),
+	    ets_cache:new(?VCARD_XUPDATE_CACHE, CacheOpts);
+	false ->
+	    ets_cache:delete(?VCARD_XUPDATE_CACHE)
+    end.
 
-import(LServer) ->
-    [{<<"select username, hash from vcard_xupdate;">>,
-      fun([LUser, Hash]) ->
-              #vcard_xupdate{us = {LUser, LServer}, hash = Hash}
-      end}].
+-spec cache_opts(gen_mod:opts()) -> [proplists:property()].
+cache_opts(Opts) ->
+    MaxSize = mod_vcard_xupdate_opt:cache_size(Opts),
+    CacheMissed = mod_vcard_xupdate_opt:cache_missed(Opts),
+    LifeTime = mod_vcard_xupdate_opt:cache_life_time(Opts),
+    [{max_size, MaxSize}, {cache_missed, CacheMissed}, {life_time, LifeTime}].
 
-import(_LServer, mnesia, #vcard_xupdate{} = R) ->
-    mnesia:dirty_write(R);
-import(_LServer, riak, #vcard_xupdate{} = R) ->
-    ejabberd_riak:put(R, vcard_xupdate_schema());
-import(_, _, _) ->
-    pass.
+-spec use_cache(binary()) -> boolean().
+use_cache(Host) ->
+    mod_vcard_xupdate_opt:use_cache(Host).
+
+-spec compute_hash(xmlel()) -> binary() | external.
+compute_hash(VCard) ->
+    case fxml:get_subtag(VCard, <<"PHOTO">>) of
+	false ->
+	    <<>>;
+	Photo ->
+	    try xmpp:decode(Photo, ?NS_VCARD, []) of
+		#vcard_photo{binval = <<_, _/binary>> = BinVal} ->
+		    str:sha(BinVal);
+		#vcard_photo{extval = <<_, _/binary>>} ->
+		    external;
+		_ ->
+		    <<>>
+	    catch _:{xmpp_codec, _} ->
+		    <<>>
+	    end
+    end.
+
+%%====================================================================
+%% Options
+%%====================================================================
+mod_opt_type(use_cache) ->
+    econf:bool();
+mod_opt_type(cache_size) ->
+    econf:pos_int(infinity);
+mod_opt_type(cache_missed) ->
+    econf:bool();
+mod_opt_type(cache_life_time) ->
+    econf:timeout(second, infinity).
+
+mod_options(Host) ->
+    [{use_cache, ejabberd_option:use_cache(Host)},
+     {cache_size, ejabberd_option:cache_size(Host)},
+     {cache_missed, ejabberd_option:cache_missed(Host)},
+     {cache_life_time, ejabberd_option:cache_life_time(Host)}].
+
+mod_doc() ->
+    #{desc =>
+          [?T("The user's client can store an avatar in the "
+              "user vCard. The vCard-Based Avatars protocol "
+              "(https://xmpp.org/extensions/xep-0153.html[XEP-0153]) "
+              "provides a method for clients to inform the contacts "
+              "what is the avatar hash value. However, simple or small "
+              "clients may not implement that protocol."), "",
+           ?T("If this module is enabled, all the outgoing client presence "
+              "stanzas get automatically the avatar hash on behalf of the "
+              "client. So, the contacts receive the presence stanzas with "
+              "the 'Update Data' described in "
+              "https://xmpp.org/extensions/xep-0153.html[XEP-0153] as if the "
+              "client would had inserted it itself. If the client had already "
+              "included such element in the presence stanza, it is replaced "
+              "with the element generated by ejabberd."), "",
+           ?T("By enabling this module, each vCard modification produces "
+              "a hash recalculation, and each presence sent by a client "
+              "produces hash retrieval and a presence stanza rewrite. "
+              "For this reason, enabling this module will introduce a "
+              "computational overhead in servers with clients that change "
+              "frequently their presence. However, the overhead is significantly "
+              "reduced by the use of caching, so you probably don't want "
+              "to set 'use_cache' to 'false'."), "",
+           ?T("The module depends on _`mod_vcard`_."), "",
+           ?T("NOTE: Nowadays https://xmpp.org/extensions/xep-0153.html"
+              "[XEP-0153] is used mostly as \"read-only\", i.e. modern "
+              "clients don't publish their avatars inside vCards. Thus "
+              "in the majority of cases the module is only used along "
+              "with _`mod_avatar`_ for providing backward compatibility.")],
+      opts =>
+          [{use_cache,
+            #{value => "true | false",
+              desc =>
+                  ?T("Same as top-level _`use_cache`_ option, but applied to this module only.")}},
+           {cache_size,
+            #{value => "pos_integer() | infinity",
+              desc =>
+                  ?T("Same as top-level _`cache_size`_ option, but applied to this module only.")}},
+           {cache_missed,
+            #{value => "true | false",
+              desc =>
+                  ?T("Same as top-level _`cache_missed`_ option, but applied to this module only.")}},
+           {cache_life_time,
+            #{value => "timeout()",
+              desc =>
+                  ?T("Same as top-level _`cache_life_time`_ option, but applied to this module only.")}}]}.

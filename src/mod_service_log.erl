@@ -5,7 +5,7 @@
 %%% Created : 24 Aug 2003 by Alexey Shchepin <alexey@process-one.net>
 %%%
 %%%
-%%% ejabberd, Copyright (C) 2002-2015   ProcessOne
+%%% ejabberd, Copyright (C) 2002-2022   ProcessOne
 %%%
 %%% This program is free software; you can redistribute it and/or
 %%% modify it under the terms of the GNU General Public License as
@@ -29,15 +29,12 @@
 
 -behaviour(gen_mod).
 
--export([start/2,
-	 stop/1,
-	 log_user_send/3,
-	 log_user_receive/4]).
+-export([start/2, stop/1, log_user_send/1, mod_options/1,
+	 log_user_receive/1, mod_opt_type/1, depends/2, mod_doc/0]).
 
--include("ejabberd.hrl").
 -include("logger.hrl").
-
--include("jlib.hrl").
+-include("translate.hrl").
+-include_lib("xmpp/include/xmpp.hrl").
 
 start(Host, _Opts) ->
     ejabberd_hooks:add(user_send_packet, Host, ?MODULE,
@@ -53,45 +50,58 @@ stop(Host) ->
 			  ?MODULE, log_user_receive, 50),
     ok.
 
-log_user_send(From, To, Packet) ->
-    log_packet(From, To, Packet, From#jid.lserver).
+depends(_Host, _Opts) ->
+    [].
 
-log_user_receive(_JID, From, To, Packet) ->
-    log_packet(From, To, Packet, To#jid.lserver).
+-spec log_user_send({stanza(), ejabberd_c2s:state()}) -> {stanza(), ejabberd_c2s:state()}.
+log_user_send({Packet, C2SState}) ->
+    From = xmpp:get_from(Packet),
+    log_packet(Packet, From#jid.lserver),
+    {Packet, C2SState}.
 
-log_packet(From, To,
-	   #xmlel{name = Name, attrs = Attrs, children = Els},
-	   Host) ->
-    Loggers = gen_mod:get_module_opt(Host, ?MODULE, loggers,
-                                     fun(L) ->
-                                             lists:map(
-                                               fun(S) ->
-                                                       B = iolist_to_binary(S),
-                                                       N = jlib:nameprep(B),
-                                                       if N /= error ->
-                                                               N
-                                                       end
-                                               end, L)
-                                     end, []),
-    ServerJID = #jid{user = <<"">>, server = Host,
-		     resource = <<"">>, luser = <<"">>, lserver = Host,
-		     lresource = <<"">>},
-    NewAttrs =
-	jlib:replace_from_to_attrs(jlib:jid_to_string(From),
-				   jlib:jid_to_string(To), Attrs),
-    FixedPacket = #xmlel{name = Name, attrs = NewAttrs,
-			 children = Els},
-    lists:foreach(fun (Logger) ->
-			  ejabberd_router:route(ServerJID,
-						#jid{user = <<"">>,
-						     server = Logger,
-						     resource = <<"">>,
-						     luser = <<"">>,
-						     lserver = Logger,
-						     lresource = <<"">>},
-						#xmlel{name = <<"route">>,
-						       attrs = [],
-						       children =
-							   [FixedPacket]})
-		  end,
-		  Loggers).
+-spec log_user_receive({stanza(), ejabberd_c2s:state()}) -> {stanza(), ejabberd_c2s:state()}.
+log_user_receive({Packet, C2SState}) ->
+    To = xmpp:get_to(Packet),
+    log_packet(Packet, To#jid.lserver),
+    {Packet, C2SState}.
+
+-spec log_packet(stanza(), binary()) -> ok.
+log_packet(Packet, Host) ->
+    Loggers = mod_service_log_opt:loggers(Host),
+    ForwardedMsg = #message{from = jid:make(Host),
+			    id = p1_rand:get_string(),
+			    sub_els = [#forwarded{
+					  sub_els = [Packet]}]},
+    lists:foreach(
+      fun(Logger) ->
+	      ejabberd_router:route(xmpp:set_to(ForwardedMsg, jid:make(Logger)))
+      end, Loggers).
+
+mod_opt_type(loggers) ->
+    econf:list(econf:domain()).
+
+mod_options(_) ->
+    [{loggers, []}].
+
+mod_doc() ->
+    #{desc =>
+          ?T("This module forwards copies of all stanzas "
+             "to remote XMPP servers or components. "
+             "Every stanza is encapsulated into <forwarded/> "
+             "element as described in "
+             "https://xmpp.org/extensions/xep-0297.html"
+             "[XEP-0297: Stanza Forwarding]."),
+      opts =>
+          [{loggers,
+            #{value => "[Domain, ...]",
+              desc =>
+                  ?T("A list of servers or connected components "
+                     "to which stanzas will be forwarded.")}}],
+      example =>
+          ["modules:",
+           "  ...",
+           "  mod_service_log:",
+           "    loggers:",
+           "      - xmpp-server.tld",
+           "      - component.domain.tld",
+           "  ..."]}.

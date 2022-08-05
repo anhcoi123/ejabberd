@@ -1,108 +1,113 @@
 %%%-------------------------------------------------------------------
-%%% @author Evgeny Khramtsov <ekhramtsov@process-one.net>
-%%% @copyright (C) 2015, Evgeny Khramtsov
-%%% @doc
-%%%
-%%% @end
+%%% File    : ejabberd_sm_redis.erl
+%%% Author  : Evgeny Khramtsov <ekhramtsov@process-one.net>
 %%% Created : 11 Mar 2015 by Evgeny Khramtsov <ekhramtsov@process-one.net>
-%%%-------------------------------------------------------------------
--module(ejabberd_sm_redis).
+%%%
+%%%
+%%% ejabberd, Copyright (C) 2002-2022   ProcessOne
+%%%
+%%% This program is free software; you can redistribute it and/or
+%%% modify it under the terms of the GNU General Public License as
+%%% published by the Free Software Foundation; either version 2 of the
+%%% License, or (at your option) any later version.
+%%%
+%%% This program is distributed in the hope that it will be useful,
+%%% but WITHOUT ANY WARRANTY; without even the implied warranty of
+%%% MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+%%% General Public License for more details.
+%%%
+%%% You should have received a copy of the GNU General Public License along
+%%% with this program; if not, write to the Free Software Foundation, Inc.,
+%%% 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+%%%
+%%%----------------------------------------------------------------------
 
+-module(ejabberd_sm_redis).
+-ifndef(GEN_SERVER).
+-define(GEN_SERVER, p1_server).
+-endif.
+-behaviour(?GEN_SERVER).
 -behaviour(ejabberd_sm).
 
-%% API
--export([init/0,
-	 set_session/1,
-	 delete_session/4,
-	 get_sessions/0,
-	 get_sessions/1,
-	 get_sessions/2,
-	 get_sessions/3]).
+-export([init/0, set_session/1, delete_session/1,
+	 get_sessions/0, get_sessions/1, get_sessions/2,
+	 cache_nodes/1, clean_table/1, clean_table/0]).
+%% gen_server callbacks
+-export([init/1, handle_cast/2, handle_call/3, handle_info/2,
+	 terminate/2, code_change/3, start_link/0]).
 
--include("ejabberd.hrl").
 -include("ejabberd_sm.hrl").
 -include("logger.hrl").
--include("jlib.hrl").
 
--define(PROCNAME, 'ejabberd_redis_client').
+-define(SM_KEY, <<"ejabberd:sm">>).
+-define(MIN_REDIS_VERSION, <<"3.2.0">>).
+-record(state, {}).
 
 %%%===================================================================
 %%% API
 %%%===================================================================
 -spec init() -> ok | {error, any()}.
 init() ->
-    Server = ejabberd_config:get_option(redis_server,
-					fun iolist_to_list/1,
-					"localhost"),
-    Port = ejabberd_config:get_option(redis_port,
-				      fun(P) when is_integer(P),
-						  P>0, P<65536 ->
-					      P
-				      end, 6379),
-    DB = ejabberd_config:get_option(redis_db,
-				    fun(I) when is_integer(I), I >= 0 ->
-					    I
-				    end, 0),
-    Pass = ejabberd_config:get_option(redis_password,
-				      fun iolist_to_list/1,
-				      ""),
-    ReconnTimeout = timer:seconds(
-		      ejabberd_config:get_option(
-			redis_reconnect_timeout,
-			fun(I) when is_integer(I), I>0 -> I end,
-			1)),
-    ConnTimeout = timer:seconds(
-		    ejabberd_config:get_option(
-		      redis_connect_timeout,
-		      fun(I) when is_integer(I), I>0 -> I end,
-		      1)),
-    case eredis:start_link(Server, Port, DB, Pass,
-			   ReconnTimeout, ConnTimeout) of
-	{ok, Client} ->
-	    register(?PROCNAME, Client),
-	    clean_table(),
-	    ok;
-	{error, _} = Err ->
-	    ?ERROR_MSG("failed to start redis client: ~p", [Err]),
-	    Err
+    Spec = {?MODULE, {?MODULE, start_link, []},
+	    transient, 5000, worker, [?MODULE]},
+    case supervisor:start_child(ejabberd_backend_sup, Spec) of
+	{ok, _Pid} -> ok;
+	Err -> Err
     end.
 
--spec set_session(#session{}) -> ok.
+-spec start_link() -> {ok, pid()} | {error, any()}.
+start_link() ->
+    ?GEN_SERVER:start_link({local, ?MODULE}, ?MODULE, [], []).
+
+-spec cache_nodes(binary()) -> [node()].
+cache_nodes(_LServer) ->
+    [node()].
+
+-spec set_session(#session{}) -> ok | {error, ejabberd_redis:error_reason()}.
 set_session(Session) ->
     T = term_to_binary(Session),
     USKey = us_to_key(Session#session.us),
     SIDKey = sid_to_key(Session#session.sid),
     ServKey = server_to_key(element(2, Session#session.us)),
     USSIDKey = us_sid_to_key(Session#session.us, Session#session.sid),
-    case eredis:qp(?PROCNAME, [["HSET", USKey, SIDKey, T],
-			       ["HSET", ServKey, USSIDKey, T]]) of
-	[{ok, _}, {ok, _}] ->
+    NodeHostKey = node_host_to_key(node(), element(2, Session#session.us)),
+    case ejabberd_redis:multi(
+	   fun() ->
+		   ejabberd_redis:hset(USKey, SIDKey, T),
+		   ejabberd_redis:hset(ServKey, USSIDKey, T),
+		   ejabberd_redis:hset(NodeHostKey,
+				       <<USKey/binary, "||", SIDKey/binary>>,
+				       USSIDKey),
+		   ejabberd_redis:publish(
+		     ?SM_KEY, term_to_binary({delete, Session#session.us}))
+	   end) of
+	{ok, _} ->
 	    ok;
 	Err ->
-	    ?ERROR_MSG("failed to set session for redis: ~p", [Err])
+	    Err
     end.
 
--spec delete_session(binary(), binary(), binary(), sid()) ->
-			    {ok, #session{}} | {error, notfound}.
-delete_session(LUser, LServer, _LResource, SID) ->
-    USKey = us_to_key({LUser, LServer}),
-    case eredis:q(?PROCNAME, ["HGETALL", USKey]) of
-	{ok, Vals} ->
-	    Ss = decode_session_list(Vals),
-	    case lists:keyfind(SID, #session.sid, Ss) of
-		false ->
-		    {error, notfound};
-		Session ->
-		    SIDKey = sid_to_key(SID),
-		    ServKey = server_to_key(element(2, Session#session.us)),
-		    USSIDKey = us_sid_to_key(Session#session.us, SID),
-		    eredis:qp(?PROCNAME, [["HDEL", USKey, SIDKey],
-					  ["HDEL", ServKey, USSIDKey]]),
-		    {ok, Session}
-	    end;
+-spec delete_session(#session{}) -> ok | {error, ejabberd_redis:error_reason()}.
+delete_session(#session{sid = SID} = Session) ->
+    USKey = us_to_key(Session#session.us),
+    SIDKey = sid_to_key(SID),
+    ServKey = server_to_key(element(2, Session#session.us)),
+    USSIDKey = us_sid_to_key(Session#session.us, SID),
+    NodeHostKey = node_host_to_key(node(), element(2, Session#session.us)),
+    case ejabberd_redis:multi(
+	   fun() ->
+		   ejabberd_redis:hdel(USKey, [SIDKey]),
+		   ejabberd_redis:hdel(ServKey, [USSIDKey]),
+		   ejabberd_redis:hdel(NodeHostKey,
+				       [<<USKey/binary, "||", SIDKey/binary>>]),
+		   ejabberd_redis:publish(
+		     ?SM_KEY,
+		     term_to_binary({delete, Session#session.us}))
+	   end) of
+	{ok, _} ->
+	    ok;
 	Err ->
-	    ?ERROR_MSG("failed to delete session from redis: ~p", [Err]),
-	    {error, notfound}
+	    Err
     end.
 
 -spec get_sessions() -> [#session{}].
@@ -110,53 +115,73 @@ get_sessions() ->
     lists:flatmap(
       fun(LServer) ->
 	      get_sessions(LServer)
-      end, ?MYHOSTS).
+      end, ejabberd_sm:get_vh_by_backend(?MODULE)).
 
 -spec get_sessions(binary()) -> [#session{}].
 get_sessions(LServer) ->
     ServKey = server_to_key(LServer),
-    case eredis:q(?PROCNAME, ["HGETALL", ServKey]) of
+    case ejabberd_redis:hgetall(ServKey) of
 	{ok, Vals} ->
 	    decode_session_list(Vals);
-	Err ->
-	    ?ERROR_MSG("failed to get sessions from redis: ~p", [Err]),
+	{error, _} ->
 	    []
     end.
 
--spec get_sessions(binary(), binary()) -> [#session{}].
+-spec get_sessions(binary(), binary()) -> {ok, [#session{}]} |
+					  {error, ejabberd_redis:error_reason()}.
 get_sessions(LUser, LServer) ->
     USKey = us_to_key({LUser, LServer}),
-    case eredis:q(?PROCNAME, ["HGETALL", USKey]) of
-	{ok, Vals} when is_list(Vals) ->
-	    decode_session_list(Vals);
+    case ejabberd_redis:hgetall(USKey) of
+	{ok, Vals} ->
+	    {ok, decode_session_list(Vals)};
 	Err ->
-	    ?ERROR_MSG("failed to get sessions from redis: ~p", [Err]),
-	    []
+	    Err
     end.
 
--spec get_sessions(binary(), binary(), binary()) -> [#session{}].
-get_sessions(LUser, LServer, LResource) ->
-    USKey = us_to_key({LUser, LServer}),
-    case eredis:q(?PROCNAME, ["HGETALL", USKey]) of
-	{ok, Vals} when is_list(Vals) ->
-	    [S || S <- decode_session_list(Vals),
-		  element(3, S#session.usr) == LResource];
-	Err ->
-	    ?ERROR_MSG("failed to get sessions from redis: ~p", [Err]),
-	    []
+%%%===================================================================
+%%% gen_server callbacks
+%%%===================================================================
+init([]) ->
+    ejabberd_redis:subscribe([?SM_KEY]),
+    case clean_table() of
+	ok -> {ok, #state{}};
+	{error, Why} -> {stop, Why}
     end.
+
+handle_call(Request, From, State) ->
+    ?WARNING_MSG("Unexpected call from ~p: ~p", [From, Request]),
+    {noreply, State}.
+
+handle_cast(Msg, State) ->
+    ?WARNING_MSG("Unexpected cast: ~p", [Msg]),
+    {noreply, State}.
+
+handle_info({redis_message, ?SM_KEY, Data}, State) ->
+    case binary_to_term(Data) of
+	{delete, Key} ->
+	    ets_cache:delete(?SM_CACHE, Key);
+	Msg ->
+	    ?WARNING_MSG("Unexpected redis message: ~p", [Msg])
+    end,
+    {noreply, State};
+handle_info(Info, State) ->
+    ?ERROR_MSG("Unexpected info: ~p", [Info]),
+    {noreply, State}.
+
+terminate(_Reason, _State) ->
+    ok.
+
+code_change(_OldVsn, State, _Extra) ->
+    {ok, State}.
 
 %%%===================================================================
 %%% Internal functions
 %%%===================================================================
-iolist_to_list(IOList) ->
-    binary_to_list(iolist_to_binary(IOList)).
-
 us_to_key({LUser, LServer}) ->
-    <<"ejabberd:sm:", LUser/binary, "@", LServer/binary>>.
+    <<(?SM_KEY)/binary, ":", LUser/binary, "@", LServer/binary>>.
 
 server_to_key(LServer) ->
-    <<"ejabberd:sm:", LServer/binary>>.
+    <<(?SM_KEY)/binary, ":", LServer/binary>>.
 
 us_sid_to_key(US, SID) ->
     term_to_binary({US, SID}).
@@ -164,46 +189,75 @@ us_sid_to_key(US, SID) ->
 sid_to_key(SID) ->
     term_to_binary(SID).
 
-decode_session_list([_, Val|T]) ->
-    [binary_to_term(Val)|decode_session_list(T)];
-decode_session_list([]) ->
-    [].
+node_session_deletion_cursor(Node, Host) ->
+    NodeName = node_host_to_key(Node, Host),
+    <<NodeName/binary, ":deletioncursor">>.
+
+node_host_to_key(Node, Host) when is_atom(Node) ->
+    NodeBin = atom_to_binary(node(), utf8),
+    node_host_to_key(NodeBin, Host);
+node_host_to_key(NodeBin, Host) ->
+    HostKey = server_to_key(Host),
+    <<HostKey/binary, ":node:", NodeBin/binary>>.
+
+decode_session_list(Vals) ->
+  [binary_to_term(Val) || {_, Val} <- Vals].
 
 clean_table() ->
-    ?INFO_MSG("Cleaning Redis SM table...", []),
-    lists:foreach(
-      fun(LServer) ->
-	      ServKey = server_to_key(LServer),
-	      case eredis:q(?PROCNAME, ["HKEYS", ServKey]) of
-		  {ok, []} ->
-		      ok;
-		  {ok, Vals} ->
-		      Vals1 = lists:filter(
-				fun(USSIDKey) ->
-					{_, SID} = binary_to_term(USSIDKey),
-					node(element(2, SID)) == node()
-				end, Vals),
-		      Q1 = ["HDEL", ServKey | Vals1],
-		      Q2 = lists:map(
-			     fun(USSIDKey) ->
-				     {US, SID} = binary_to_term(USSIDKey),
-				     USKey = us_to_key(US),
-				     SIDKey = sid_to_key(SID),
-				     ["HDEL", USKey, SIDKey]
-			     end, Vals1),
-		      Res = eredis:qp(?PROCNAME, [Q1|Q2]),
-		      case lists:filter(
-			     fun({ok, _}) -> false;
-				(_) -> true
-			     end, Res) of
-			  [] ->
-			      ok;
-			  Errs ->
-			      ?ERROR_MSG("failed to clean redis table for "
-					 "server ~s: ~p", [LServer, Errs])
-		      end;
-		  Err ->
-		      ?ERROR_MSG("failed to clean redis table for "
-				 "server ~s: ~p", [LServer, Err])
-	      end
-      end, ?MYHOSTS).
+    clean_table(node()).
+
+clean_table(Node) when is_atom(Node) ->
+    clean_table(atom_to_binary(Node, utf8));
+clean_table(Node) ->
+    ?DEBUG("Cleaning Redis SM table... ", []),
+    try
+	lists:foreach(
+	  fun(Host) ->
+		  ok = clean_node_sessions(Node, Host)
+	  end, ejabberd_sm:get_vh_by_backend(?MODULE))
+    catch _:{badmatch, {error, _} = Err} ->
+	    ?ERROR_MSG("Failed to clean Redis SM table", []),
+	    Err
+    end.
+
+clean_node_sessions(Node, Host) ->
+    case load_script() of
+        {ok, SHA} ->
+            clean_node_sessions(Node, Host, SHA);
+        Err ->
+            Err
+    end.
+
+clean_node_sessions(Node, Host, SHA) ->
+    Keys = [node_host_to_key(Node, Host),
+	    server_to_key(Host),
+	    node_session_deletion_cursor(Node, Host)],
+    case ejabberd_redis:evalsha(SHA, Keys, [1000]) of
+	{ok, <<"0">>} ->
+	    ok;
+	{ok, _Cursor} ->
+	    clean_node_sessions(Node, Host, SHA);
+	{error, _} = Err ->
+	    Err
+    end.
+
+load_script() ->
+    case misc:read_lua("redis_sm.lua") of
+	{ok, Data} ->
+	    case ejabberd_redis:info(server) of
+		{ok, Info} ->
+		    case proplists:get_value(redis_version, Info) of
+			V when V >= ?MIN_REDIS_VERSION ->
+			    ejabberd_redis:script_load(Data);
+			V ->
+			    ?CRITICAL_MSG("Unsupported Redis version: ~ts. "
+					  "The version must be ~ts or above",
+					  [V, ?MIN_REDIS_VERSION]),
+			    {error, unsupported_redis_version}
+		    end;
+		{error, _} = Err ->
+		    Err
+	    end;
+	{error, _} = Err ->
+	    Err
+    end.

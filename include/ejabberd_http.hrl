@@ -1,6 +1,6 @@
 %%%----------------------------------------------------------------------
 %%%
-%%% ejabberd, Copyright (C) 2002-2015   ProcessOne
+%%% ejabberd, Copyright (C) 2002-2022   ProcessOne
 %%%
 %%% This program is free software; you can redistribute it and/or
 %%% modify it under the terms of the GNU General Public License as
@@ -19,25 +19,27 @@
 %%%----------------------------------------------------------------------
 
 -record(request,
-	{method, %            :: method(),
+	{method            :: method(),
 	 path = []         :: [binary()],
+	 raw_path          :: binary(),
 	 q = []            :: [{binary() | nokey, binary()}],
 	 us = {<<>>, <<>>} :: {binary(), binary()},
-	 auth              :: {binary(), binary()} |
-	 {auth_jid, {binary(), binary()}, jlib:jid()},
+	 auth              :: {binary(), binary()} | {oauth, binary(), []} | undefined | invalid,
 	 lang = <<"">>     :: binary(),
 	 data = <<"">>     :: binary(),
 	 ip                :: {inet:ip_address(), inet:port_number()},
 	 host = <<"">>     :: binary(),
 	 port = 5280       :: inet:port_number(),
-	 tp = http, %         :: protocol(),
 	 opts = []         :: list(),
-	 headers = []      :: [{atom() | binary(), binary()}]}).
-
+	 tp = http         :: protocol(),
+	 headers = []      :: [{atom() | binary(), binary()}],
+	 length = 0        :: non_neg_integer(),
+	 sockmod           :: gen_tcp | fast_tls,
+	 socket            :: inet:socket() | fast_tls:tls_socket()}).
 
 -record(ws,
-	{socket                  :: inet:socket() | p1_tls:tls_socket(),
-	 sockmod = gen_tcp       :: gen_tcp | p1_tls,
+	{socket                  :: inet:socket() | fast_tls:tls_socket(),
+	 sockmod = gen_tcp       :: gen_tcp | fast_tls,
 	 ip                      :: {inet:ip_address(), inet:port_number()},
 	 host = <<"">>           :: binary(),
 	 port = 5280             :: inet:port_number(),
@@ -45,4 +47,9 @@
 	 headers = []            :: [{atom() | binary(), binary()}],
 	 local_path = []         :: [binary()],
 	 q = []                  :: [{binary() | nokey, binary()}],
-	 buf                     :: binary()}).
+	 buf                     :: binary(),
+         http_opts = []          :: list()}).
+
+-type method() :: 'GET' | 'HEAD' | 'DELETE' | 'OPTIONS' | 'PUT' | 'POST' | 'TRACE' | 'PATCH'.
+-type protocol() :: http | https.
+-type http_request() :: #request{}.

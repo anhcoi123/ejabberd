@@ -1,60 +1,62 @@
-%%% ====================================================================
-%%% ``The contents of this file are subject to the Erlang Public License,
-%%% Version 1.1, (the "License"); you may not use this file except in
-%%% compliance with the License. You should have received a copy of the
-%%% Erlang Public License along with this software. If not, it can be
-%%% retrieved via the world wide web at http://www.erlang.org/.
+%%%----------------------------------------------------------------------
+%%% File    : node_pep.erl
+%%% Author  : Christophe Romain <christophe.romain@process-one.net>
+%%% Purpose : Standard PubSub PEP plugin
+%%% Created :  1 Dec 2007 by Christophe Romain <christophe.romain@process-one.net>
 %%%
 %%%
-%%% Software distributed under the License is distributed on an "AS IS"
-%%% basis, WITHOUT WARRANTY OF ANY KIND, either express or implied. See
-%%% the License for the specific language governing rights and limitations
-%%% under the License.
+%%% ejabberd, Copyright (C) 2002-2022   ProcessOne
 %%%
+%%% This program is free software; you can redistribute it and/or
+%%% modify it under the terms of the GNU General Public License as
+%%% published by the Free Software Foundation; either version 2 of the
+%%% License, or (at your option) any later version.
 %%%
-%%% The Initial Developer of the Original Code is ProcessOne.
-%%% Portions created by ProcessOne are Copyright 2006-2015, ProcessOne
-%%% All Rights Reserved.''
-%%% This software is copyright 2006-2015, ProcessOne.
+%%% This program is distributed in the hope that it will be useful,
+%%% but WITHOUT ANY WARRANTY; without even the implied warranty of
+%%% MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+%%% General Public License for more details.
 %%%
-%%% @copyright 2006-2015 ProcessOne
-%%% @author Christophe Romain <christophe.romain@process-one.net>
-%%%   [http://www.process-one.net/]
-%%% @version {@vsn}, {@date} {@time}
-%%% @end
-%%% ====================================================================
+%%% You should have received a copy of the GNU General Public License along
+%%% with this program; if not, write to the Free Software Foundation, Inc.,
+%%% 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+%%%
+%%%----------------------------------------------------------------------
+
+%%% @doc The module <strong>{@module}</strong> is the pep PubSub plugin.
+%%% <p>PubSub plugin nodes are using the {@link gen_pubsub_node} behaviour.</p>
 
 -module(node_pep).
 -behaviour(gen_pubsub_node).
 -author('christophe.romain@process-one.net').
 
 -include("pubsub.hrl").
--include("jlib.hrl").
--include("logger.hrl").
-
-%%% @doc The module <strong>{@module}</strong> is the pep PubSub plugin.
-%%% <p>PubSub plugin nodes are using the {@link gen_pubsub_node} behaviour.</p>
 
 -export([init/3, terminate/2, options/0, features/0,
     create_node_permission/6, create_node/2, delete_node/1,
     purge_node/2, subscribe_node/8, unsubscribe_node/4,
-    publish_item/6, delete_item/4, remove_extra_items/3,
+    publish_item/7, delete_item/4,
+    remove_extra_items/2, remove_extra_items/3, remove_expired_items/2,
     get_entity_affiliations/2, get_node_affiliations/1,
     get_affiliation/2, set_affiliation/3,
     get_entity_subscriptions/2, get_node_subscriptions/1,
     get_subscriptions/2, set_subscriptions/4,
     get_pending_nodes/2, get_states/1, get_state/2,
     set_state/1, get_items/7, get_items/3, get_item/7,
+    get_last_items/3, get_only_item/2,
     get_item/2, set_item/1, get_item_name/3, node_to_path/1,
-    path_to_node/1]).
+    path_to_node/1, depends/3]).
+
+depends(_Host, _ServerHost, _Opts) ->
+    [{mod_caps, hard}].
 
 init(Host, ServerHost, Opts) ->
-    node_hometree:init(Host, ServerHost, Opts),
-    complain_if_modcaps_disabled(ServerHost),
+    node_flat:init(Host, ServerHost, Opts),
     ok.
 
 terminate(Host, ServerHost) ->
-    node_hometree:terminate(Host, ServerHost), ok.
+    node_flat:terminate(Host, ServerHost),
+    ok.
 
 options() ->
     [{deliver_payloads, true},
@@ -62,7 +64,7 @@ options() ->
 	{notify_delete, false},
 	{notify_retract, false},
 	{purge_offline, false},
-	{persist_items, false},
+	{persist_items, true},
 	{max_items, 1},
 	{subscribe, true},
 	{access_model, presence},
@@ -72,19 +74,23 @@ options() ->
 	{max_payload_size, ?MAX_PAYLOAD_SIZE},
 	{send_last_published_item, on_sub_and_presence},
 	{deliver_notifications, true},
-	{presence_based_delivery, true}].
+	{presence_based_delivery, true},
+	{itemreply, none}].
 
 features() ->
     [<<"create-nodes">>,
 	<<"auto-create">>,
 	<<"auto-subscribe">>,
+	<<"config-node">>,
 	<<"delete-nodes">>,
 	<<"delete-items">>,
 	<<"filtered-notifications">>,
 	<<"modify-affiliations">>,
+	<<"multi-items">>,
 	<<"outcast-affiliation">>,
 	<<"persistent-items">>,
 	<<"publish">>,
+	<<"publish-options">>,
 	<<"purge-nodes">>,
 	<<"retract-items">>,
 	<<"retrieve-affiliations">>,
@@ -93,7 +99,7 @@ features() ->
 	<<"subscribe">>].
 
 create_node_permission(Host, ServerHost, _Node, _ParentNode, Owner, Access) ->
-    LOwner = jlib:jid_tolower(Owner),
+    LOwner = jid:tolower(Owner),
     {User, Server, _Resource} = LOwner,
     Allowed = case LOwner of
 	{<<"">>, Host, <<"">>} ->
@@ -112,39 +118,45 @@ create_node_permission(Host, ServerHost, _Node, _ParentNode, Owner, Access) ->
     {result, Allowed}.
 
 create_node(Nidx, Owner) ->
-    node_hometree:create_node(Nidx, Owner).
+    node_flat:create_node(Nidx, Owner).
 
 delete_node(Nodes) ->
-    {result, {_, _, Result}} = node_hometree:delete_node(Nodes),
-    {result, {[], Result}}.
+    node_flat:delete_node(Nodes).
 
 subscribe_node(Nidx, Sender, Subscriber, AccessModel,
 	    SendLast, PresenceSubscription, RosterGroup, Options) ->
-    node_hometree:subscribe_node(Nidx, Sender, Subscriber, AccessModel, SendLast,
+    node_flat:subscribe_node(Nidx, Sender, Subscriber, AccessModel, SendLast,
 	PresenceSubscription, RosterGroup, Options).
 
 unsubscribe_node(Nidx, Sender, Subscriber, SubId) ->
-    case node_hometree:unsubscribe_node(Nidx, Sender, Subscriber, SubId) of
+    case node_flat:unsubscribe_node(Nidx, Sender, Subscriber, SubId) of
 	{error, Error} -> {error, Error};
-	{result, _} -> {result, []}
+	{result, _} -> {result, default}
     end.
 
-publish_item(Nidx, Publisher, Model, MaxItems, ItemId, Payload) ->
-    node_hometree:publish_item(Nidx, Publisher, Model, MaxItems, ItemId, Payload).
+publish_item(Nidx, Publisher, Model, MaxItems, ItemId, Payload, PubOpts) ->
+    node_flat:publish_item(Nidx, Publisher, Model, MaxItems, ItemId,
+	Payload, PubOpts).
+
+remove_extra_items(Nidx, MaxItems) ->
+    node_flat:remove_extra_items(Nidx, MaxItems).
 
 remove_extra_items(Nidx, MaxItems, ItemIds) ->
-    node_hometree:remove_extra_items(Nidx, MaxItems, ItemIds).
+    node_flat:remove_extra_items(Nidx, MaxItems, ItemIds).
+
+remove_expired_items(Nidx, Seconds) ->
+    node_flat:remove_expired_items(Nidx, Seconds).
 
 delete_item(Nidx, Publisher, PublishModel, ItemId) ->
-    node_hometree:delete_item(Nidx, Publisher, PublishModel, ItemId).
+    node_flat:delete_item(Nidx, Publisher, PublishModel, ItemId).
 
 purge_node(Nidx, Owner) ->
-    node_hometree:purge_node(Nidx, Owner).
+    node_flat:purge_node(Nidx, Owner).
 
 get_entity_affiliations(Host, Owner) ->
-    {_, D, _} = SubKey = jlib:jid_tolower(Owner),
-    SubKey = jlib:jid_tolower(Owner),
-    GenKey = jlib:jid_remove_resource(SubKey),
+    {_, D, _} = SubKey = jid:tolower(Owner),
+    SubKey = jid:tolower(Owner),
+    GenKey = jid:remove_resource(SubKey),
     States = mnesia:match_object(#pubsub_state{stateid = {GenKey, '_'}, _ = '_'}),
     NodeTree = mod_pubsub:tree(Host),
     Reply = lists:foldl(fun (#pubsub_state{stateid = {_, N}, affiliation = A}, Acc) ->
@@ -158,17 +170,17 @@ get_entity_affiliations(Host, Owner) ->
 
 
 get_node_affiliations(Nidx) ->
-    node_hometree:get_node_affiliations(Nidx).
+    node_flat:get_node_affiliations(Nidx).
 
 get_affiliation(Nidx, Owner) ->
-    node_hometree:get_affiliation(Nidx, Owner).
+    node_flat:get_affiliation(Nidx, Owner).
 
 set_affiliation(Nidx, Owner, Affiliation) ->
-    node_hometree:set_affiliation(Nidx, Owner, Affiliation).
+    node_flat:set_affiliation(Nidx, Owner, Affiliation).
 
 get_entity_subscriptions(Host, Owner) ->
-    {U, D, _} = SubKey = jlib:jid_tolower(Owner),
-    GenKey = jlib:jid_remove_resource(SubKey),
+    {U, D, _} = SubKey = jid:tolower(Owner),
+    GenKey = jid:remove_resource(SubKey),
     States = case SubKey of
 	GenKey ->
 	    mnesia:match_object(#pubsub_state{stateid = {{U, D, '_'}, '_'}, _ = '_'});
@@ -198,66 +210,54 @@ get_entity_subscriptions(Host, Owner) ->
     {result, Reply}.
 
 get_node_subscriptions(Nidx) ->
-    node_hometree:get_node_subscriptions(Nidx).
+    node_flat:get_node_subscriptions(Nidx).
 
 get_subscriptions(Nidx, Owner) ->
-    node_hometree:get_subscriptions(Nidx, Owner).
+    node_flat:get_subscriptions(Nidx, Owner).
 
 set_subscriptions(Nidx, Owner, Subscription, SubId) ->
-    node_hometree:set_subscriptions(Nidx, Owner, Subscription, SubId).
+    node_flat:set_subscriptions(Nidx, Owner, Subscription, SubId).
 
 get_pending_nodes(Host, Owner) ->
-    node_hometree:get_pending_nodes(Host, Owner).
+    node_flat:get_pending_nodes(Host, Owner).
 
 get_states(Nidx) ->
-    node_hometree:get_states(Nidx).
+    node_flat:get_states(Nidx).
 
 get_state(Nidx, JID) ->
-    node_hometree:get_state(Nidx, JID).
+    node_flat:get_state(Nidx, JID).
 
 set_state(State) ->
-    node_hometree:set_state(State).
+    node_flat:set_state(State).
 
 get_items(Nidx, From, RSM) ->
-    node_hometree:get_items(Nidx, From, RSM).
+    node_flat:get_items(Nidx, From, RSM).
 
 get_items(Nidx, JID, AccessModel, PresenceSubscription, RosterGroup, SubId, RSM) ->
-    node_hometree:get_items(Nidx, JID, AccessModel,
+    node_flat:get_items(Nidx, JID, AccessModel,
 	PresenceSubscription, RosterGroup, SubId, RSM).
 
+get_last_items(Nidx, From, Count) ->
+    node_flat:get_last_items(Nidx, From, Count).
+
+get_only_item(Nidx, From) ->
+    node_flat:get_only_item(Nidx, From).
+
 get_item(Nidx, ItemId) ->
-    node_hometree:get_item(Nidx, ItemId).
+    node_flat:get_item(Nidx, ItemId).
 
 get_item(Nidx, ItemId, JID, AccessModel, PresenceSubscription, RosterGroup, SubId) ->
-    node_hometree:get_item(Nidx, ItemId, JID, AccessModel,
+    node_flat:get_item(Nidx, ItemId, JID, AccessModel,
 	PresenceSubscription, RosterGroup, SubId).
 
 set_item(Item) ->
-    node_hometree:set_item(Item).
+    node_flat:set_item(Item).
 
 get_item_name(Host, Node, Id) ->
-    node_hometree:get_item_name(Host, Node, Id).
+    node_flat:get_item_name(Host, Node, Id).
 
 node_to_path(Node) ->
     node_flat:node_to_path(Node).
 
 path_to_node(Path) ->
     node_flat:path_to_node(Path).
-
-%%%
-%%% Internal
-%%%
-
-%% @doc Check mod_caps is enabled, otherwise show warning.
-%% The PEP plugin for mod_pubsub requires mod_caps to be enabled in the host.
-%% Check that the mod_caps module is enabled in that Jabber Host
-%% If not, show a warning message in the ejabberd log file.
-complain_if_modcaps_disabled(ServerHost) ->
-    case gen_mod:is_loaded(ServerHost, mod_caps) of
-	false ->
-	    ?WARNING_MSG("The PEP plugin is enabled in mod_pubsub "
-		"of host ~p. This plugin requires mod_caps "
-		"to be enabled, but it isn't.",
-		[ServerHost]);
-	true -> ok
-    end.

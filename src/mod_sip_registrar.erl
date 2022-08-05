@@ -1,12 +1,11 @@
 %%%-------------------------------------------------------------------
-%%% @author Evgeny Khramtsov <ekhramtsov@process-one.net>
-%%% @copyright (C) 2014, Evgeny Khramtsov
-%%% @doc
-%%%
-%%% @end
+%%% File    : mod_sip_registrar.erl
+%%% Author  : Evgeny Khramtsov <ekhramtsov@process-one.net>
+%%% Purpose :
 %%% Created : 23 Apr 2014 by Evgeny Khramtsov <ekhramtsov@process-one.net>
 %%%
-%%% ejabberd, Copyright (C) 2014-2015   ProcessOne
+%%%
+%%% ejabberd, Copyright (C) 2014-2022   ProcessOne
 %%%
 %%% This program is free software; you can redistribute it and/or
 %%% modify it under the terms of the GNU General Public License as
@@ -21,11 +20,17 @@
 %%% You should have received a copy of the GNU General Public License along
 %%% with this program; if not, write to the Free Software Foundation, Inc.,
 %%% 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
-
+%%%
 %%%-------------------------------------------------------------------
+
 -module(mod_sip_registrar).
 
--define(GEN_SERVER, p1_server).
+-ifndef(SIP).
+-export([]).
+-else.
+-ifndef(GEN_SERVER).
+-define(GEN_SERVER, gen_server).
+-endif.
 -behaviour(?GEN_SERVER).
 
 %% API
@@ -35,22 +40,19 @@
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2,
 	 terminate/2, code_change/3]).
 
--include("ejabberd.hrl").
 -include("logger.hrl").
 -include_lib("esip/include/esip.hrl").
 
 -define(CALL_TIMEOUT, timer:seconds(30)).
 -define(DEFAULT_EXPIRES, 3600).
--define(FLOW_TIMEOUT_UDP, 29).
--define(FLOW_TIMEOUT_TCP, 120).
 
 -record(sip_session, {us = {<<"">>, <<"">>} :: {binary(), binary()},
 		      socket = #sip_socket{} :: #sip_socket{},
 		      call_id = <<"">> :: binary(),
 		      cseq = 0 :: non_neg_integer(),
-		      timestamp = now() :: erlang:timestamp(),
+		      timestamp = erlang:timestamp() :: erlang:timestamp(),
 		      contact :: {binary(), #uri{}, [{binary(), binary()}]},
-		      flow_tref :: reference(),
+		      flow_tref :: reference() | undefined,
 		      reg_tref = make_ref() :: reference(),
 		      conn_mref = make_ref() :: reference(),
 		      expires = 0 :: non_neg_integer()}).
@@ -65,8 +67,8 @@ start_link() ->
 
 request(#sip{hdrs = Hdrs} = Req, SIPSock) ->
     {_, #uri{user = U, host = S}, _} = esip:get_hdr('to', Hdrs),
-    LUser = jlib:nodeprep(U),
-    LServer = jlib:nameprep(S),
+    LUser = jid:nodeprep(U),
+    LServer = jid:nameprep(S),
     {PeerIP, _} = SIPSock#sip_socket.peer,
     US = {LUser, LServer},
     CallID = esip:get_hdr('call-id', Hdrs),
@@ -78,7 +80,7 @@ request(#sip{hdrs = Hdrs} = Req, SIPSock) ->
         [<<"*">>] when Expires == 0 ->
             case unregister_session(US, CallID, CSeq) of
 		{ok, ContactsWithExpires} ->
-		    ?INFO_MSG("unregister SIP session for user ~s@~s from ~s",
+		    ?INFO_MSG("Unregister SIP session for user ~ts@~ts from ~ts",
 			      [LUser, LServer, inet_parse:ntoa(PeerIP)]),
 		    Cs = prepare_contacts_to_send(ContactsWithExpires),
 		    mod_sip:make_response(
@@ -112,7 +114,7 @@ request(#sip{hdrs = Hdrs} = Req, SIPSock) ->
 					  IsOutboundSupported,
 					  ContactsWithExpires) of
 			{ok, Res} ->
-			    ?INFO_MSG("~s SIP session for user ~s@~s from ~s",
+			    ?INFO_MSG("~ts SIP session for user ~ts@~ts from ~ts",
 				      [Res, LUser, LServer,
 				       inet_parse:ntoa(PeerIP)]),
 			    Cs = prepare_contacts_to_send(ContactsWithExpires),
@@ -178,14 +180,13 @@ ping(SIPSocket) ->
 %%% gen_server callbacks
 %%%===================================================================
 init([]) ->
+    process_flag(trap_exit, true),
     update_table(),
-    mnesia:create_table(sip_session,
+    ejabberd_mnesia:create(?MODULE, sip_session,
 			[{ram_copies, [node()]},
 			 {type, bag},
-			 {attributes, record_info(fields, sip_session)}]),
-    mnesia:add_table_index(sip_session, conn_mref),
-    mnesia:add_table_index(sip_session, socket),
-    mnesia:add_table_copy(sip_session, node(), ram_copies),
+			 {attributes, record_info(fields, sip_session)},
+			 {index, [conn_mref,socket]}]),
     {ok, #state{}}.
 
 handle_call({write, Sessions, Supported}, _From, State) ->
@@ -197,11 +198,12 @@ handle_call({delete, US, CallID, CSeq}, _From, State) ->
 handle_call({ping, SIPSocket}, _From, State) ->
     Res = process_ping(SIPSocket),
     {reply, Res, State};
-handle_call(_Request, _From, State) ->
-    Reply = ok,
-    {reply, Reply, State}.
+handle_call(Request, From, State) ->
+    ?WARNING_MSG("Unexpected call from ~p: ~p", [From, Request]),
+    {noreply, State}.
 
-handle_cast(_Msg, State) ->
+handle_cast(Msg, State) ->
+    ?WARNING_MSG("Unexpected cast: ~p", [Msg]),
     {noreply, State}.
 
 handle_info({write, Sessions, Supported}, State) ->
@@ -221,8 +223,8 @@ handle_info({'DOWN', MRef, process, _Pid, _Reason}, State) ->
 	    ok
     end,
     {noreply, State};
-handle_info(_Info, State) ->
-    ?ERROR_MSG("got unexpected info: ~p", [_Info]),
+handle_info(Info, State) ->
+    ?WARNING_MSG("Unexpected info: ~p", [Info]),
     {noreply, State}.
 
 terminate(_Reason, _State) ->
@@ -242,7 +244,7 @@ register_session(US, SIPSocket, CallID, CSeq, IsOutboundSupported,
 				      socket = SIPSocket,
 				      call_id = CallID,
 				      cseq = CSeq,
-				      timestamp = now(),
+				      timestamp = erlang:timestamp(),
 				      contact = Contact,
 				      expires = Expires}
 		 end, ContactsWithExpires),
@@ -355,7 +357,7 @@ min_expires() ->
     60.
 
 to_integer(Bin, Min, Max) ->
-    case catch list_to_integer(binary_to_list(Bin)) of
+    case catch (binary_to_integer(Bin)) of
         N when N >= Min, N =< Max ->
             {ok, N};
         _ ->
@@ -490,15 +492,12 @@ need_ob_hdrs(Contacts, _IsOutboundSupported = true) ->
       end, Contacts).
 
 get_flow_timeout(LServer, #sip_socket{type = Type}) ->
-    {Option, Default} =
-	case Type of
-	    udp -> {flow_timeout_udp, ?FLOW_TIMEOUT_UDP};
-	    _ -> {flow_timeout_tcp, ?FLOW_TIMEOUT_TCP}
-	end,
-    gen_mod:get_module_opt(
-      LServer, mod_sip, Option,
-      fun(I) when is_integer(I), I>0 -> I end,
-      Default).
+    case Type of
+	udp ->
+	    mod_sip_opt:flow_timeout_udp(LServer) div 1000;
+	_ ->
+	    mod_sip_opt:flow_timeout_tcp(LServer) div 1000
+    end.
 
 update_table() ->
     Fields = record_info(fields, sip_session),
@@ -550,8 +549,8 @@ close_socket(#sip_session{socket = SIPSocket}) ->
 delete_session(#sip_session{reg_tref = RegTRef,
 			    flow_tref = FlowTRef,
 			    conn_mref = MRef} = Session) ->
-    erlang:cancel_timer(RegTRef),
-    catch erlang:cancel_timer(FlowTRef),
+    misc:cancel_timer(RegTRef),
+    misc:cancel_timer(FlowTRef),
     catch erlang:demonitor(MRef, [flush]),
     mnesia:dirty_delete_object(Session).
 
@@ -569,13 +568,10 @@ process_ping(SIPSocket) ->
 	      mnesia:dirty_delete_object(Session),
 	      Timeout = get_flow_timeout(LServer, SIPSocket),
 	      NewTRef = set_timer(Session, Timeout),
-	      case mnesia:dirty_write(
-		     Session#sip_session{flow_tref = NewTRef}) of
-		  ok ->
-		      pong;
-		  _Err ->
-		      pang
-	      end;
+	      mnesia:dirty_write(Session#sip_session{flow_tref = NewTRef}),
+	      pong;
 	 (_, Acc) ->
 	      Acc
       end, ErrResponse, Sessions).
+
+-endif.
