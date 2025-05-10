@@ -3,7 +3,7 @@
 %%% Created :  4 Mar 2017 by Evgeny Khramtsov <ekhramtsov@process-one.net>
 %%%
 %%%
-%%% ejabberd, Copyright (C) 2002-2022   ProcessOne
+%%% ejabberd, Copyright (C) 2002-2025   ProcessOne
 %%%
 %%% This program is free software; you can redistribute it and/or
 %%% modify it under the terms of the GNU General Public License as
@@ -34,7 +34,7 @@
 -export([ejabberd_started/0, config_reloaded/0, cert_expired/2]).
 %% gen_server callbacks
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2,
-	 terminate/2, code_change/3, format_status/2]).
+	 terminate/2, code_change/3]).
 
 -include("logger.hrl").
 -define(CALL_TIMEOUT, timer:minutes(1)).
@@ -224,10 +224,6 @@ terminate(_Reason, State) ->
 -spec code_change(term() | {down, term()}, state(), term()) -> {ok, state()}.
 code_change(_OldVsn, State, _Extra) ->
     {ok, State}.
-
--spec format_status(normal | terminate, list()) -> term().
-format_status(_Opt, Status) ->
-    Status.
 
 %%%===================================================================
 %%% Internal functions

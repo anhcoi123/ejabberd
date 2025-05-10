@@ -7,7 +7,7 @@
 %%%              {mod_carboncopy, []}
 %%%
 %%%
-%%% ejabberd, Copyright (C) 2002-2022   ProcessOne
+%%% ejabberd, Copyright (C) 2002-2025   ProcessOne
 %%%
 %%% This program is free software; you can redistribute it and/or
 %%% modify it under the terms of the GNU General Public License as
@@ -27,7 +27,7 @@
 -module (mod_carboncopy).
 
 -author ('ecestari@process-one.net').
--protocol({xep, 280, '0.13.2'}).
+-protocol({xep, 280, '1.0.1', '13.06', "complete", ""}).
 
 -behaviour(gen_mod).
 
@@ -37,7 +37,8 @@
 -export([user_send_packet/1, user_receive_packet/1,
 	 iq_handler/1, disco_features/5,
 	 depends/2, mod_options/1, mod_doc/0]).
--export([c2s_copy_session/2, c2s_session_opened/1, c2s_session_resumed/1]).
+-export([c2s_copy_session/2, c2s_session_opened/1, c2s_session_resumed/1,
+	 c2s_inline_features/2, c2s_handle_bind2_inline/1]).
 %% For debugging purposes
 -export([list/2]).
 
@@ -48,25 +49,20 @@
 -type direction() :: sent | received.
 -type c2s_state() :: ejabberd_c2s:state().
 
-start(Host, _Opts) ->
-    ejabberd_hooks:add(disco_local_features, Host, ?MODULE, disco_features, 50),
-    %% why priority 89: to define clearly that we must run BEFORE mod_logdb hook (90)
-    ejabberd_hooks:add(user_send_packet,Host, ?MODULE, user_send_packet, 89),
-    ejabberd_hooks:add(user_receive_packet,Host, ?MODULE, user_receive_packet, 89),
-    ejabberd_hooks:add(c2s_copy_session, Host, ?MODULE, c2s_copy_session, 50),
-    ejabberd_hooks:add(c2s_session_resumed, Host, ?MODULE, c2s_session_resumed, 50),
-    ejabberd_hooks:add(c2s_session_opened, Host, ?MODULE, c2s_session_opened, 50),
-    gen_iq_handler:add_iq_handler(ejabberd_sm, Host, ?NS_CARBONS_2, ?MODULE, iq_handler).
+start(_Host, _Opts) ->
+    {ok, [{hook, disco_local_features, disco_features, 50},
+          %% why priority 89: to define clearly that we must run BEFORE mod_logdb hook (90)
+          {hook, user_send_packet, user_send_packet, 89},
+          {hook, user_receive_packet, user_receive_packet, 89},
+          {hook, c2s_copy_session, c2s_copy_session, 50},
+          {hook, c2s_session_resumed, c2s_session_resumed, 50},
+          {hook, c2s_session_opened, c2s_session_opened, 50},
+	  {hook, c2s_inline_features, c2s_inline_features, 50},
+	  {hook, c2s_handle_bind2_inline, c2s_handle_bind2_inline, 50},
+	  {iq_handler, ejabberd_sm, ?NS_CARBONS_2, iq_handler}]}.
 
-stop(Host) ->
-    gen_iq_handler:remove_iq_handler(ejabberd_sm, Host, ?NS_CARBONS_2),
-    ejabberd_hooks:delete(disco_local_features, Host, ?MODULE, disco_features, 50),
-    %% why priority 89: to define clearly that we must run BEFORE mod_logdb hook (90)
-    ejabberd_hooks:delete(user_send_packet,Host, ?MODULE, user_send_packet, 89),
-    ejabberd_hooks:delete(user_receive_packet,Host, ?MODULE, user_receive_packet, 89),
-    ejabberd_hooks:delete(c2s_copy_session, Host, ?MODULE, c2s_copy_session, 50),
-    ejabberd_hooks:delete(c2s_session_resumed, Host, ?MODULE, c2s_session_resumed, 50),
-    ejabberd_hooks:delete(c2s_session_opened, Host, ?MODULE, c2s_session_opened, 50).
+stop(_Host) ->
+    ok.
 
 reload(_Host, _NewOpts, _OldOpts) ->
     ok.
@@ -148,6 +144,23 @@ c2s_session_resumed(State) ->
 -spec c2s_session_opened(c2s_state()) -> c2s_state().
 c2s_session_opened(State) ->
     maps:remove(carboncopy, State).
+
+c2s_inline_features({Sasl, Bind, Extra} = Acc, Host) ->
+    case gen_mod:is_loaded(Host, ?MODULE) of
+	true ->
+	    {Sasl, [#bind2_feature{var = ?NS_CARBONS_2} | Bind], Extra};
+	false ->
+	    Acc
+    end.
+
+c2s_handle_bind2_inline({#{user := U, server := S, resource := R} = State, Els, Results}) ->
+    case lists:keyfind(carbons_enable, 1, Els) of
+	#carbons_enable{} ->
+	    enable(S, U, R, ?NS_CARBONS_2),
+	    {State, Els, Results};
+	_ ->
+	{State, Els, Results}
+    end.
 
 % Modified from original version:
 %    - registered to the user_send_packet hook, to be called only once even for multicast

@@ -5,7 +5,7 @@
 %%% Created :  7 Dec 2002 by Alexey Shchepin <alexey@process-one.net>
 %%%
 %%%
-%%% ejabberd, Copyright (C) 2002-2022   ProcessOne
+%%% ejabberd, Copyright (C) 2002-2025   ProcessOne
 %%%
 %%% This program is free software; you can redistribute it and/or
 %%% modify it under the terms of the GNU General Public License as
@@ -25,8 +25,6 @@
 
 -module(ejabberd_s2s).
 
--protocol({xep, 220, '1.1'}).
-
 -author('alexey@process-one.net').
 
 -behaviour(gen_server).
@@ -43,7 +41,7 @@
 	 external_host_overloaded/1, is_temporarly_blocked/1,
 	 get_commands_spec/0, zlib_enabled/1, get_idle_timeout/1,
 	 tls_required/1, tls_enabled/1, tls_options/3,
-	 host_up/1, host_down/1, queue_type/1]).
+	 host_up/1, host_down/1, queue_type/1, register_connection/1]).
 
 %% gen_server callbacks
 -export([init/1, handle_call/3, handle_cast/2,
@@ -129,6 +127,10 @@ get_connections_pids(FromTo) ->
 	_ ->
 	    []
     end.
+
+-spec register_connection(FromTo :: {binary(), binary()}) -> ok.
+register_connection(FromTo) ->
+	gen_server:call(ejabberd_s2s, {register_connection, FromTo, self()}).
 
 -spec dirty_get_connections() -> [{binary(), binary()}].
 dirty_get_connections() ->
@@ -228,6 +230,8 @@ init([]) ->
 
 handle_call({new_connection, Args}, _From, State) ->
     {reply, erlang:apply(fun new_connection_int/7, Args), State};
+handle_call({register_connection, FromTo, Pid}, _From, State) ->
+    {reply, register_connection_int(FromTo, Pid), State};
 handle_call(Request, From, State) ->
     ?WARNING_MSG("Unexpected call from ~p: ~p", [From, Request]),
     {noreply, State}.
@@ -237,7 +241,11 @@ handle_cast(Msg, State) ->
     {noreply, State}.
 
 handle_info({mnesia_system_event, {mnesia_down, Node}}, State) ->
+    ?INFO_MSG("Node ~p has left our Mnesia S2S tables", [Node]),
     clean_table_from_bad_node(Node),
+    {noreply, State};
+handle_info({mnesia_system_event, {mnesia_up, Node}}, State) ->
+    ?INFO_MSG("Node ~p joined our Mnesia S2S tables", [Node]),
     {noreply, State};
 handle_info({route, Packet}, State) ->
     try route(Packet)
@@ -473,6 +481,20 @@ new_connection_int(MyServer, Server, From, FromTo,
 	    ejabberd_s2s_out:stop_async(Pid),
 	    []
     end.
+
+-spec register_connection_int(FromTo :: {binary(), binary()}, Pid :: pid()) -> ok.
+register_connection_int(FromTo, Pid) ->
+    F = fun() ->
+			mnesia:write(#s2s{fromto = FromTo, pid = Pid})
+		end,
+    TRes = mnesia:transaction(F),
+    case TRes of
+	{atomic, _} ->
+		erlang:monitor(process, Pid),
+		ok;
+	_ ->
+		ok
+	end.
 
 -spec max_s2s_connections_number({binary(), binary()}) -> pos_integer().
 max_s2s_connections_number({From, To}) ->

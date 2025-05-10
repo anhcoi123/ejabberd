@@ -3,7 +3,7 @@
 %%% Created :  2 Jun 2013 by Evgeniy Khramtsov <ekhramtsov@process-one.net>
 %%%
 %%%
-%%% ejabberd, Copyright (C) 2002-2022   ProcessOne
+%%% ejabberd, Copyright (C) 2002-2025   ProcessOne
 %%%
 %%% This program is free software; you can redistribute it and/or
 %%% modify it under the terms of the GNU General Public License as
@@ -60,6 +60,11 @@ init_per_suite(Config) ->
     NewConfig.
 
 start_ejabberd(_) ->
+    TestBeams = case filelib:is_dir("../../test/") of
+       true -> "../../test/";
+       _ -> "../../lib/ejabberd/test/"
+    end,
+    application:set_env(ejabberd, external_beams, TestBeams),
     {ok, _} = application:ensure_all_started(ejabberd, transient).
 
 end_per_suite(_Config) ->
@@ -99,7 +104,8 @@ do_init_per_group(mysql, Config) ->
     case catch ejabberd_sql:sql_query(?MYSQL_VHOST, [<<"select 1;">>]) of
         {selected, _, _} ->
             mod_muc:shutdown_rooms(?MYSQL_VHOST),
-            clear_sql_tables(mysql, ?config(base_dir, Config)),
+            update_sql(?MYSQL_VHOST, Config),
+            stop_temporary_modules(?MYSQL_VHOST),
             set_opt(server, ?MYSQL_VHOST, Config);
         Err ->
             {skip, {mysql_not_available, Err}}
@@ -108,7 +114,8 @@ do_init_per_group(mssql, Config) ->
     case catch ejabberd_sql:sql_query(?MSSQL_VHOST, [<<"select 1;">>]) of
         {selected, _, _} ->
             mod_muc:shutdown_rooms(?MSSQL_VHOST),
-            clear_sql_tables(mssql, ?config(base_dir, Config)),
+            update_sql(?MSSQL_VHOST, Config),
+            stop_temporary_modules(?MSSQL_VHOST),
             set_opt(server, ?MSSQL_VHOST, Config);
         Err ->
             {skip, {mssql_not_available, Err}}
@@ -117,7 +124,8 @@ do_init_per_group(pgsql, Config) ->
     case catch ejabberd_sql:sql_query(?PGSQL_VHOST, [<<"select 1;">>]) of
         {selected, _, _} ->
             mod_muc:shutdown_rooms(?PGSQL_VHOST),
-            clear_sql_tables(pgsql, ?config(base_dir, Config)),
+            update_sql(?PGSQL_VHOST, Config),
+            stop_temporary_modules(?PGSQL_VHOST),
             set_opt(server, ?PGSQL_VHOST, Config);
         Err ->
             {skip, {pgsql_not_available, Err}}
@@ -161,15 +169,44 @@ do_init_per_group(GroupName, Config) ->
 	_ -> NewConfig
     end.
 
+stop_temporary_modules(Host) ->
+    Modules = [mod_shared_roster],
+    [gen_mod:stop_module(Host, M) || M <- Modules].
+
 end_per_group(mnesia, _Config) ->
     ok;
 end_per_group(redis, _Config) ->
     ok;
-end_per_group(mysql, _Config) ->
+end_per_group(mysql, Config) ->
+    Query = "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = 'mqtt_pub';",
+    case catch ejabberd_sql:sql_query(?MYSQL_VHOST, [Query]) of
+        {selected, _, [[<<"0">>]]} ->
+            ok;
+        {selected, _, [[<<"1">>]]} ->
+            clear_sql_tables(mysql, Config);
+        Other ->
+            ct:fail({failed_to_check_table_existence, mysql, Other})
+    end,
     ok;
-end_per_group(mssql, _Config) ->
+end_per_group(mssql, Config) ->
+    Query = "SELECT * FROM sys.tables WHERE name = 'mqtt_pub'",
+    case catch ejabberd_sql:sql_query(?MSSQL_VHOST, [Query]) of
+        {selected, [t]} ->
+            clear_sql_tables(mssql, Config);
+        Other ->
+            ct:fail({failed_to_check_table_existence, mssql, Other})
+    end,
     ok;
-end_per_group(pgsql, _Config) ->
+end_per_group(pgsql, Config) ->
+    Query = "SELECT EXISTS (SELECT 0 FROM information_schema.tables WHERE table_name = 'mqtt_pub');",
+    case catch ejabberd_sql:sql_query(?PGSQL_VHOST, [Query]) of
+        {selected, [t]} ->
+            clear_sql_tables(pgsql, Config);
+	{selected, _, [[<<"t">>]]} ->
+	    clear_sql_tables(pgsql, Config);
+        Other ->
+            ct:fail({failed_to_check_table_existence, pgsql, Other})
+    end,
     ok;
 end_per_group(sqlite, _Config) ->
     ok;
@@ -365,6 +402,8 @@ no_db_tests() ->
      auth_external_wrong_jid,
      auth_external_wrong_server,
      auth_external_invalid_cert,
+     commands_tests:single_cases(),
+     configtest_tests:single_cases(),
      jidprep_tests:single_cases(),
      sm_tests:single_cases(),
      sm_tests:master_slave_cases(),
@@ -397,6 +436,7 @@ db_tests(DB) when DB == mnesia; DB == redis ->
        mam_tests:single_cases(),
        csi_tests:single_cases(),
        push_tests:single_cases(),
+       test_pass_change,
        test_unregister]},
      muc_tests:master_slave_cases(),
      privacy_tests:master_slave_cases(),
@@ -426,6 +466,7 @@ db_tests(DB) ->
        offline_tests:single_cases(),
        mam_tests:single_cases(),
        push_tests:single_cases(),
+       test_pass_change,
        test_unregister]},
      muc_tests:master_slave_cases(),
      privacy_tests:master_slave_cases(),
@@ -643,6 +684,25 @@ register(Config) ->
               sub_els = [#register{username = ?config(user, Config),
                                    password = ?config(password, Config)}]}),
     Config.
+
+test_pass_change(Config) ->
+    case ?config(register, Config) of
+	true ->
+	    #iq{type = result, sub_els = []} =
+		send_recv(
+		    Config,
+		    #iq{type = set,
+			sub_els = [#register{username = ?config(user, Config),
+					     password = ?config(password, Config)}]}),
+	    #iq{type = result, sub_els = []} =
+		send_recv(
+		    Config,
+		    #iq{type = set,
+			sub_els = [#register{username = str:to_upper(?config(user, Config)),
+					     password = ?config(password, Config)}]});
+	_ ->
+	    {skipped, 'registration_not_available'}
+    end.
 
 test_unregister(Config) ->
     case ?config(register, Config) of
@@ -894,7 +954,10 @@ presence_broadcast(Config) ->
     IQ = #iq{type = get,
 	     from = JID,
 	     sub_els = [#disco_info{node = Node}]} = recv_iq(Config),
-    #message{type = normal} = recv_message(Config),
+    #message{type = chat,
+             subject = [#text{lang = <<"en">>,data = <<"Welcome!">>}]} = recv_message(Config),
+    #message{type = normal,
+             subject = [#text{lang = <<"en">>,data = <<"Welcome!">>}]} = recv_message(Config),
     #presence{from = JID, to = JID} = recv_presence(Config),
     send(Config, #iq{type = result, id = IQ#iq.id,
 		     to = JID, sub_els = [Info]}),
@@ -1011,37 +1074,35 @@ bookmark_conference() ->
 '$handle_undefined_function'(_, _) ->
     erlang:error(undef).
 
+
 %%%===================================================================
 %%% SQL stuff
 %%%===================================================================
-clear_sql_tables(sqlite, _BaseDir) ->
+update_sql(Host, Config) ->
+    case ?config(update_sql, Config) of
+        true ->
+            mod_admin_update_sql:update_sql(Host);
+        false -> ok
+    end.
+
+schema_suffix(Config) ->
+    case ejabberd_sql:use_new_schema() of
+        true ->
+            case ?config(update_sql, Config) of
+                true ->  ".sql";
+                _ -> ".new.sql"
+            end;
+        _ -> ".sql"
+    end.
+
+clear_sql_tables(sqlite, _Config) ->
     ok;
-clear_sql_tables(Type, BaseDir) ->
+clear_sql_tables(Type, Config) ->
+    BaseDir = ?config(base_dir, Config),
     {VHost, File} = case Type of
-                        mysql ->
-                            Path = case ejabberd_sql:use_new_schema() of
-                                true ->
-                                    "mysql.new.sql";
-                                false ->
-                                    "mysql.sql"
-                            end,
-                            {?MYSQL_VHOST, Path};
-                        mssql ->
-                            Path = case ejabberd_sql:use_new_schema() of
-                                true ->
-                                    "mssql.new.sql";
-                                false ->
-                                    "mssql.sql"
-                            end,
-                            {?MSSQL_VHOST, Path};
-                        pgsql ->
-                            Path = case ejabberd_sql:use_new_schema() of
-                                true ->
-                                    "pg.new.sql";
-                                false ->
-                                    "pg.sql"
-                            end,
-                            {?PGSQL_VHOST, Path}
+                        mysql -> {?MYSQL_VHOST, "mysql" ++ schema_suffix(Config)};
+                        mssql -> {?MSSQL_VHOST, "mssql" ++ schema_suffix(Config)};
+                        pgsql -> {?PGSQL_VHOST, "pg" ++ schema_suffix(Config)}
                     end,
     SQLFile = filename:join([BaseDir, "sql", File]),
     CreationQueries = read_sql_queries(SQLFile),
@@ -1067,7 +1128,17 @@ clear_table_queries(Queries) ->
       fun(Query, Acc) ->
               case split(str:to_lower(Query)) of
                   [<<"create">>, <<"table">>, Table|_] ->
-                      [<<"DELETE FROM ", Table/binary, ";">>|Acc];
+                      GlobalRamTables = [<<"bosh">>,
+                                         <<"oauth_client">>,
+                                         <<"oauth_token">>,
+                                         <<"proxy65">>,
+                                         <<"route">>],
+                      case lists:member(Table, GlobalRamTables) of
+                          true ->
+                              Acc;
+                          false ->
+                              [<<"DELETE FROM ", Table/binary, ";">>|Acc]
+                      end;
                   _ ->
                       Acc
               end

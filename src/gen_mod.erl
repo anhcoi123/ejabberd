@@ -5,7 +5,7 @@
 %%% Created : 24 Jan 2003 by Alexey Shchepin <alexey@process-one.net>
 %%%
 %%%
-%%% ejabberd, Copyright (C) 2002-2022   ProcessOne
+%%% ejabberd, Copyright (C) 2002-2025   ProcessOne
 %%%
 %%% This program is free software; you can redistribute it and/or
 %%% modify it under the terms of the GNU General Public License as
@@ -45,10 +45,12 @@
 -include("logger.hrl").
 -include_lib("stdlib/include/ms_transform.hrl").
 -include("ejabberd_stacktrace.hrl").
+-include("ejabberd_commands.hrl").
 
 -record(ejabberd_module,
         {module_host = {undefined, <<"">>} :: {atom(), binary()},
          opts = [] :: opts() | '_' | '$2',
+         registrations = [] :: [registration()],
 	 order = 0 :: integer()}).
 
 -type opts() :: #{atom() => term()}.
@@ -57,12 +59,29 @@
                       value => string() | binary()}.
 -type opt_doc() :: {atom(), opt_desc()} | {atom(), opt_desc(), [opt_doc()]}.
 
--callback start(binary(), opts()) -> ok | {ok, pid()} | {error, term()}.
+-type component() :: ejabberd_sm | ejabberd_local.
+-type registration() ::
+        {hook, atom(), atom(), integer()} |
+        {hook, atom(), atom(), integer(), binary() | global} |
+        {hook, atom(), module(), atom(), integer()} |
+        {hook_subscribe, atom(), atom(), [any()]} |
+        {hook_subscribe, atom(), atom(), [any()], binary() | global} |
+        {hook_subscribe, atom(), module(), atom(), [any()]} |
+        {hook_subscribe, atom(), module(), atom(), [any()], binary() | global} |
+        {commands, [ejabberd_commands()]} |
+        {iq_handler, component(), binary(), atom()} |
+        {iq_handler, component(), binary(), module(), atom()}.
+-export_type([registration/0]).
+
+-callback start(binary(), opts()) ->
+    ok | {ok, pid()} |
+    {ok, [registration()]} | {error, term()}.
 -callback stop(binary()) -> any().
 -callback reload(binary(), opts(), opts()) -> ok | {ok, pid()} | {error, term()}.
 -callback mod_opt_type(atom()) -> econf:validator().
 -callback mod_options(binary()) -> [{atom(), term()} | atom()].
 -callback mod_doc() -> #{desc => binary() | [binary()],
+                         note => string(),
                          opts => [opt_doc()],
                          example => [string()] | [{binary(), [string()]}]}.
 -callback depends(binary(), opts()) -> [{module(), hard | soft}].
@@ -155,6 +174,10 @@ start_module(Host, Module, Opts, Order) ->
     try case Module:start(Host, Opts) of
 	    ok -> ok;
 	    {ok, Pid} when is_pid(Pid) -> {ok, Pid};
+	    {ok, Registrations} when is_list(Registrations) ->
+                store_options(Host, Module, Opts, Registrations, Order),
+                add_registrations(Host, Module, Registrations),
+                ok;
 	    Err ->
 		ets:delete(ejabberd_modules, {Module, Host}),
 		erlang:error({bad_return, Module, Err})
@@ -246,9 +269,21 @@ update_module(Host, Module, Opts) ->
 
 -spec store_options(binary(), module(), opts(), integer()) -> true.
 store_options(Host, Module, Opts, Order) ->
+    case ets:lookup(ejabberd_modules, {Module, Host}) of
+	[M] ->
+            store_options(
+              Host, Module, Opts, M#ejabberd_module.registrations, Order);
+	[] ->
+            store_options(Host, Module, Opts, [], Order)
+    end.
+
+-spec store_options(binary(), module(), opts(), [registration()], integer()) -> true.
+store_options(Host, Module, Opts, Registrations, Order) ->
     ets:insert(ejabberd_modules,
 	       #ejabberd_module{module_host = {Module, Host},
-				opts = Opts, order = Order}).
+				opts = Opts,
+                                registrations = Registrations,
+                                order = Order}).
 
 maybe_halt_ejabberd() ->
     case is_app_running(ejabberd) of
@@ -281,16 +316,21 @@ stop_modules(Host) ->
 		stop_module_keep_config(Host, Module)
 	end, Modules).
 
--spec stop_module(binary(), atom()) -> error | {aborted, any()} | {atomic, any()}.
+-spec stop_module(binary(), atom()) -> error | ok.
 stop_module(Host, Module) ->
-    case stop_module_keep_config(Host, Module) of
-      error -> error;
-      ok -> ok
-    end.
+    stop_module_keep_config(Host, Module).
 
 -spec stop_module_keep_config(binary(), atom()) -> error | ok.
 stop_module_keep_config(Host, Module) ->
     ?DEBUG("Stopping ~ts at ~ts", [Module, Host]),
+    Registrations =
+        case ets:lookup(ejabberd_modules, {Module, Host}) of
+            [M] ->
+                M#ejabberd_module.registrations;
+            [] ->
+                []
+        end,
+    del_registrations(Host, Module, Registrations),
     try Module:stop(Host) of
 	_ ->
 	    ets:delete(ejabberd_modules, {Module, Host}),
@@ -302,6 +342,58 @@ stop_module_keep_config(Host, Module) ->
                         misc:format_exception(2, Class, Reason, StackTrace)]),
 	    error
     end.
+
+-spec add_registrations(binary(), module(), [registration()]) -> ok.
+add_registrations(Host, Module, Registrations) ->
+    lists:foreach(
+      fun({hook, Hook, Function, Seq}) ->
+              ejabberd_hooks:add(Hook, Host, Module, Function, Seq);
+         ({hook, Hook, Function, Seq, Host1}) when is_integer(Seq) ->
+              ejabberd_hooks:add(Hook, Host1, Module, Function, Seq);
+         ({hook, Hook, Module1, Function, Seq}) when is_integer(Seq) ->
+              ejabberd_hooks:add(Hook, Host, Module1, Function, Seq);
+         ({hook_subscribe, Hook, Function, InitArg}) ->
+              ejabberd_hooks:subscribe(Hook, Host, Module, Function, InitArg);
+         ({hook_subscribe, Hook, Function, InitArg, Host1}) when is_binary(Host1) or (Host1 == global) ->
+              ejabberd_hooks:subscribe(Hook, Host1, Module, Function, InitArg);
+         ({hook_subscribe, Hook, Module1, Function, InitArg}) ->
+              ejabberd_hooks:subscribe(Hook, Host, Module1, Function, InitArg);
+         ({hook_subscribe, Hook, Module1, Function, InitArg, Host1}) ->
+              ejabberd_hooks:subscribe(Hook, Host1, Module1, Function, InitArg);
+         ({commands, Commands}) ->
+              ejabberd_commands:register_commands(Host, Module, Commands);
+         ({iq_handler, Component, NS, Function}) ->
+              gen_iq_handler:add_iq_handler(
+                Component, Host, NS, Module, Function);
+         ({iq_handler, Component, NS, Module1, Function}) ->
+              gen_iq_handler:add_iq_handler(
+                Component, Host, NS, Module1, Function)
+      end, Registrations).
+
+-spec del_registrations(binary(), module(), [registration()]) -> ok.
+del_registrations(Host, Module, Registrations) ->
+    lists:foreach(
+      fun({hook, Hook, Function, Seq}) ->
+              ejabberd_hooks:delete(Hook, Host, Module, Function, Seq);
+         ({hook, Hook, Function, Seq, Host1}) when is_integer(Seq) ->
+              ejabberd_hooks:delete(Hook, Host1, Module, Function, Seq);
+         ({hook, Hook, Module1, Function, Seq}) when is_integer(Seq) ->
+              ejabberd_hooks:delete(Hook, Host, Module1, Function, Seq);
+         ({hook_subscribe, Hook, Function, InitArg}) ->
+              ejabberd_hooks:unsubscribe(Hook, Host, Module, Function, InitArg);
+         ({hook_subscribe, Hook, Function, InitArg, Host1}) when is_binary(Host1) or (Host1 == global) ->
+              ejabberd_hooks:unsubscribe(Hook, Host1, Module, Function, InitArg);
+         ({hook_subscribe, Hook, Module1, Function, InitArg}) ->
+              ejabberd_hooks:unsubscribe(Hook, Host, Module1, Function, InitArg);
+         ({hook_subscribe, Hook, Module1, Function, InitArg, Host1}) ->
+              ejabberd_hooks:unsubscribe(Hook, Host1, Module1, Function, InitArg);
+         ({commands, Commands}) ->
+              ejabberd_commands:unregister_commands(Host, Module, Commands);
+         ({iq_handler, Component, NS, _Function}) ->
+              gen_iq_handler:remove_iq_handler(Component, Host, NS);
+         ({iq_handler, Component, NS, _Module, _Function}) ->
+              gen_iq_handler:remove_iq_handler(Component, Host, NS)
+      end, Registrations).
 
 -spec get_opt(atom(), opts()) -> any().
 get_opt(Opt, Opts) ->
@@ -431,7 +523,7 @@ is_equal_opt(Opt, NewOpts, OldOpts) ->
 %%%===================================================================
 -spec format_module_error(atom(), start | reload, non_neg_integer(), opts(),
 			  error | exit | throw, any(),
-			  [erlang:stack_item()]) -> iolist().
+			  [tuple()]) -> iolist().
 format_module_error(Module, Fun, Arity, Opts, Class, Reason, St) ->
     case {Class, Reason} of
 	{error, {bad_return, Module, {error, _} = Err}} ->
@@ -485,10 +577,10 @@ validator(Host, Module, Opts) ->
 		  lists:mapfoldl(
 		    fun({Opt, Def}, {DAcc1, VAcc1}) ->
 			    {[], {DAcc1#{Opt => Def},
-				  VAcc1#{Opt => get_opt_type(Module, M, Opt)}}};
+				  VAcc1#{Opt => get_opt_type(Host, Module, M, Opt)}}};
 		       (Opt, {DAcc1, VAcc1}) ->
 			    {[Opt], {DAcc1,
-				     VAcc1#{Opt => get_opt_type(Module, M, Opt)}}}
+				     VAcc1#{Opt => get_opt_type(Host, Module, M, Opt)}}}
 		    end, {DAcc, VAcc}, DefOpts)
 	  end, {#{}, #{}}, get_defaults(Host, Module, Opts)),
     econf:and_then(
@@ -538,11 +630,16 @@ get_defaults(Host, Module, Opts) ->
 	       false
        end, DefaultOpts)].
 
--spec get_opt_type(module(), module(), atom()) -> econf:validator().
-get_opt_type(Mod, SubMod, Opt) ->
-    try SubMod:mod_opt_type(Opt)
+-spec get_opt_type(binary(), module(), module(), atom()) -> econf:validator().
+get_opt_type(Host, Mod, SubMod, Opt) ->
+    Type = try SubMod:mod_opt_type(Opt)
     catch _:_ -> Mod:mod_opt_type(Opt)
-    end.
+    end,
+    econf:and_then(
+      fun(B) ->
+              ejabberd_config:replace_keywords(Host, B)
+      end,
+      Type).
 
 -spec sort_modules(binary(), [{module(), opts()}]) -> {ok, [{module(), opts(), integer()}]}.
 sort_modules(Host, ModOpts) ->

@@ -5,8 +5,10 @@
 \#*#
 .#*
 .edts
+.tool-versions
 *.dump
 /Makefile
+/doc
 /config.log
 /config.status
 /config/releases.exs
@@ -15,6 +17,7 @@
 /*.cache
 /deps/
 /.deps-update/
+/.ejabberd-modules/
 /ebin/
 /ejabberd.init
 /ejabberd.service
@@ -31,12 +34,14 @@
 /priv/bin/captcha*sh
 /priv/sql
 /rel/ejabberd
+/recompile.log
 /_build
 /database/
 /.rebar
-/rebar.lock
 /log/
 Mnesia.nonode@nohost/
+/TAGS
+/tags
 # Binaries created with tools/make-{binaries,installers,packages}:
 /ejabberd_*.deb
 /ejabberd-*.rpm

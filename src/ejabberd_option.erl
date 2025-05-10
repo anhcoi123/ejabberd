@@ -14,10 +14,12 @@
 -export([auth_cache_life_time/0]).
 -export([auth_cache_missed/0]).
 -export([auth_cache_size/0]).
+-export([auth_external_user_exists_check/0, auth_external_user_exists_check/1]).
 -export([auth_method/0, auth_method/1]).
 -export([auth_opts/0, auth_opts/1]).
 -export([auth_password_format/0, auth_password_format/1]).
 -export([auth_scram_hash/0, auth_scram_hash/1]).
+-export([auth_stored_password_types/0, auth_stored_password_types/1]).
 -export([auth_use_cache/0, auth_use_cache/1]).
 -export([c2s_cafile/0, c2s_cafile/1]).
 -export([c2s_ciphers/0, c2s_ciphers/1]).
@@ -37,8 +39,10 @@
 -export([cluster_nodes/0]).
 -export([default_db/0, default_db/1]).
 -export([default_ram_db/0, default_ram_db/1]).
--export([define_macro/0, define_macro/1]).
+-export([define_keyword/0, define_keyword/1]).
+-export([define_macro/0]).
 -export([disable_sasl_mechanisms/0, disable_sasl_mechanisms/1]).
+-export([disable_sasl_scram_downgrade_protection/0, disable_sasl_scram_downgrade_protection/1]).
 -export([domain_balancing/0]).
 -export([ext_api_headers/0, ext_api_headers/1]).
 -export([ext_api_http_pool_size/0, ext_api_http_pool_size/1]).
@@ -52,6 +56,7 @@
 -export([host_config/0]).
 -export([hosts/0]).
 -export([include_config_file/0, include_config_file/1]).
+-export([install_contrib_modules/0]).
 -export([jwt_auth_only_rule/0, jwt_auth_only_rule/1]).
 -export([jwt_jid_field/0, jwt_jid_field/1]).
 -export([jwt_key/0, jwt_key/1]).
@@ -74,6 +79,7 @@
 -export([listen/0]).
 -export([log_burst_limit_count/0]).
 -export([log_burst_limit_window_time/0]).
+-export([log_modules_fully/0]).
 -export([log_rotate_count/0]).
 -export([log_rotate_size/0]).
 -export([loglevel/0]).
@@ -141,6 +147,7 @@
 -export([sm_use_cache/0, sm_use_cache/1]).
 -export([sql_connect_timeout/0, sql_connect_timeout/1]).
 -export([sql_database/0, sql_database/1]).
+-export([sql_flags/0, sql_flags/1]).
 -export([sql_keepalive_interval/0, sql_keepalive_interval/1]).
 -export([sql_odbc_driver/0, sql_odbc_driver/1]).
 -export([sql_password/0, sql_password/1]).
@@ -158,6 +165,8 @@
 -export([sql_type/0, sql_type/1]).
 -export([sql_username/0, sql_username/1]).
 -export([trusted_proxies/0]).
+-export([update_sql_schema/0]).
+-export([update_sql_schema_timeout/0, update_sql_schema_timeout/1]).
 -export([use_cache/0, use_cache/1]).
 -export([validate_stream/0]).
 -export([version/0]).
@@ -221,6 +230,13 @@ auth_cache_missed() ->
 auth_cache_size() ->
     ejabberd_config:get_option({auth_cache_size, global}).
 
+-spec auth_external_user_exists_check() -> boolean().
+auth_external_user_exists_check() ->
+    auth_external_user_exists_check(global).
+-spec auth_external_user_exists_check(global | binary()) -> boolean().
+auth_external_user_exists_check(Host) ->
+    ejabberd_config:get_option({auth_external_user_exists_check, Host}).
+
 -spec auth_method() -> [atom()].
 auth_method() ->
     auth_method(global).
@@ -248,6 +264,13 @@ auth_scram_hash() ->
 -spec auth_scram_hash(global | binary()) -> 'sha' | 'sha256' | 'sha512'.
 auth_scram_hash(Host) ->
     ejabberd_config:get_option({auth_scram_hash, Host}).
+
+-spec auth_stored_password_types() -> ['plain' | 'scram_sha1' | 'scram_sha256' | 'scram_sha512'].
+auth_stored_password_types() ->
+    auth_stored_password_types(global).
+-spec auth_stored_password_types(global | binary()) -> ['plain' | 'scram_sha1' | 'scram_sha256' | 'scram_sha512'].
+auth_stored_password_types(Host) ->
+    ejabberd_config:get_option({auth_stored_password_types, Host}).
 
 -spec auth_use_cache() -> boolean().
 auth_use_cache() ->
@@ -328,7 +351,7 @@ captcha_host() ->
 captcha_limit() ->
     ejabberd_config:get_option({captcha_limit, global}).
 
--spec captcha_url() -> 'undefined' | binary().
+-spec captcha_url() -> 'auto' | 'undefined' | binary().
 captcha_url() ->
     ejabberd_config:get_option({captcha_url, global}).
 
@@ -358,12 +381,16 @@ default_ram_db() ->
 default_ram_db(Host) ->
     ejabberd_config:get_option({default_ram_db, Host}).
 
+-spec define_keyword() -> any().
+define_keyword() ->
+    define_keyword(global).
+-spec define_keyword(global | binary()) -> any().
+define_keyword(Host) ->
+    ejabberd_config:get_option({define_keyword, Host}).
+
 -spec define_macro() -> any().
 define_macro() ->
-    define_macro(global).
--spec define_macro(global | binary()) -> any().
-define_macro(Host) ->
-    ejabberd_config:get_option({define_macro, Host}).
+    ejabberd_config:get_option({define_macro, global}).
 
 -spec disable_sasl_mechanisms() -> [binary()].
 disable_sasl_mechanisms() ->
@@ -371,6 +398,13 @@ disable_sasl_mechanisms() ->
 -spec disable_sasl_mechanisms(global | binary()) -> [binary()].
 disable_sasl_mechanisms(Host) ->
     ejabberd_config:get_option({disable_sasl_mechanisms, Host}).
+
+-spec disable_sasl_scram_downgrade_protection() -> boolean().
+disable_sasl_scram_downgrade_protection() ->
+    disable_sasl_scram_downgrade_protection(global).
+-spec disable_sasl_scram_downgrade_protection(global | binary()) -> boolean().
+disable_sasl_scram_downgrade_protection(Host) ->
+    ejabberd_config:get_option({disable_sasl_scram_downgrade_protection, Host}).
 
 -spec domain_balancing() -> #{binary()=>#{'component_number'=>1..1114111, 'type'=>'bare_destination' | 'bare_source' | 'destination' | 'random' | 'source'}}.
 domain_balancing() ->
@@ -447,6 +481,10 @@ include_config_file() ->
 -spec include_config_file(global | binary()) -> any().
 include_config_file(Host) ->
     ejabberd_config:get_option({include_config_file, Host}).
+
+-spec install_contrib_modules() -> [atom()].
+install_contrib_modules() ->
+    ejabberd_config:get_option({install_contrib_modules, global}).
 
 -spec jwt_auth_only_rule() -> atom().
 jwt_auth_only_rule() ->
@@ -592,6 +630,10 @@ log_burst_limit_count() ->
 -spec log_burst_limit_window_time() -> pos_integer().
 log_burst_limit_window_time() ->
     ejabberd_config:get_option({log_burst_limit_window_time, global}).
+
+-spec log_modules_fully() -> [atom()].
+log_modules_fully() ->
+    ejabberd_config:get_option({log_modules_fully, global}).
 
 -spec log_rotate_count() -> non_neg_integer().
 log_rotate_count() ->
@@ -954,6 +996,13 @@ sql_database() ->
 sql_database(Host) ->
     ejabberd_config:get_option({sql_database, Host}).
 
+-spec sql_flags() -> ['mysql_alternative_upsert'].
+sql_flags() ->
+    sql_flags(global).
+-spec sql_flags(global | binary()) -> ['mysql_alternative_upsert'].
+sql_flags(Host) ->
+    ejabberd_config:get_option({sql_flags, Host}).
+
 -spec sql_keepalive_interval() -> 'undefined' | pos_integer().
 sql_keepalive_interval() ->
     sql_keepalive_interval(global).
@@ -1069,6 +1118,17 @@ sql_username(Host) ->
 -spec trusted_proxies() -> 'all' | [{inet:ip4_address() | inet:ip6_address(),byte()}].
 trusted_proxies() ->
     ejabberd_config:get_option({trusted_proxies, global}).
+
+-spec update_sql_schema() -> boolean().
+update_sql_schema() ->
+    ejabberd_config:get_option({update_sql_schema, global}).
+
+-spec update_sql_schema_timeout() -> 'infinity' | pos_integer().
+update_sql_schema_timeout() ->
+    update_sql_schema_timeout(global).
+-spec update_sql_schema_timeout(global | binary()) -> 'infinity' | pos_integer().
+update_sql_schema_timeout(Host) ->
+    ejabberd_config:get_option({update_sql_schema_timeout, Host}).
 
 -spec use_cache() -> boolean().
 use_cache() ->

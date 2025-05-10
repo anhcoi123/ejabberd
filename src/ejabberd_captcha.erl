@@ -5,7 +5,7 @@
 %%% Created : 26 Apr 2008 by Evgeniy Khramtsov <xramtsov@gmail.com>
 %%%
 %%%
-%%% ejabberd, Copyright (C) 2002-2022   ProcessOne
+%%% ejabberd, Copyright (C) 2002-2025   ProcessOne
 %%%
 %%% This program is free software; you can redistribute it and/or
 %%% modify it under the terms of the GNU General Public License as
@@ -25,7 +25,8 @@
 
 -module(ejabberd_captcha).
 
--protocol({xep, 158, '1.0'}).
+-protocol({xep, 158, '1.0', '2.1.0', "complete", ""}).
+-protocol({xep, 231, '1.0', '2.1.0', "complete", ""}).
 
 -behaviour(gen_server).
 
@@ -76,6 +77,11 @@ mk_ocr_field(Lang, CID, Type) ->
     URI = #media_uri{type = Type, uri = <<"cid:", CID/binary>>},
     [_, F] = captcha_form:encode([{ocr, <<>>}], Lang, [ocr]),
     xmpp:set_els(F, [#media{uri = [URI]}]).
+
+update_captcha_key(_Id, Key, Key) ->
+    ok;
+update_captcha_key(Id, _Key, Key2) ->
+    true = ets:update_element(captcha, Id, [{4, Key2}]).
 
 -spec create_captcha(binary(), jid(), jid(),
                      binary(), any(),
@@ -243,7 +249,8 @@ process(_Handlers,
     case lookup_captcha(Id) of
       {ok, #captcha{key = Key}} ->
 	  case create_image(Addr, Key) of
-	    {ok, Type, _, Img} ->
+	    {ok, Type, Key2, Img} ->
+		update_captcha_key(Id, Key, Key2),
 		{200,
 		 [{<<"Content-Type">>, Type},
 		  {<<"Cache-Control">>, <<"no-cache">>},
@@ -288,7 +295,7 @@ init([]) ->
     case check_captcha_setup() of
 	true ->
 	    register_handlers(),
-	    ejabberd_hooks:add(config_reloaded, ?MODULE, config_reloaded, 50),
+	    ejabberd_hooks:add(config_reloaded, ?MODULE, config_reloaded, 70),
 	    {ok, #state{enabled = true}};
 	false ->
 	    {ok, #state{enabled = false}};
@@ -355,7 +362,7 @@ terminate(_Reason, #state{enabled = Enabled}) ->
     if Enabled -> unregister_handlers();
        true -> ok
     end,
-    ejabberd_hooks:delete(config_reloaded, ?MODULE, config_reloaded, 50).
+    ejabberd_hooks:delete(config_reloaded, ?MODULE, config_reloaded, 70).
 
 register_handlers() ->
     ejabberd_hooks:add(host_up, ?MODULE, host_up, 50),
@@ -392,6 +399,18 @@ create_image(Limiter, Key) ->
 				   {error, image_error()}.
 do_create_image(Key) ->
     FileName = get_prog_name(),
+    case length(binary:split(FileName, <<"/">>)) == 1 of
+        true ->
+            do_create_image(Key, misc:binary_to_atom(FileName));
+        false ->
+            do_create_image(Key, FileName)
+    end.
+
+do_create_image(Key, Module) when is_atom(Module) ->
+    Function = create_image,
+    erlang:apply(Module, Function, [Key]);
+
+do_create_image(Key, FileName) when is_binary(FileName) ->
     Cmd = lists:flatten(io_lib:format("~ts ~ts", [FileName, Key])),
     case cmd(Cmd) of
       {ok,
@@ -423,18 +442,40 @@ do_create_image(Key) ->
 get_prog_name() ->
     case ejabberd_option:captcha_cmd() of
         undefined ->
-            ?DEBUG("The option captcha_cmd is not configured, "
+            ?WARNING_MSG("The option captcha_cmd is not configured, "
                    "but some module wants to use the CAPTCHA "
                    "feature.",
                    []),
             false;
         FileName ->
+            maybe_warning_norequesthandler(),
             FileName
+    end.
+
+maybe_warning_norequesthandler() ->
+    Host = hd(ejabberd_option:hosts()),
+    AutoURL = get_auto_url(any, ?MODULE, Host),
+    ManualURL = ejabberd_option:captcha_url(),
+    case (AutoURL == undefined) and not is_binary(ManualURL) of
+        true ->
+            ?CRITICAL_MSG("The option captcha_cmd is configured "
+                   "and captcha_url is set to auto, "
+                   "but I couldn't find a request_handler in listen option "
+                   "configured with ejabberd_captcha and integer port. "
+                   "Please setup the URL with option captcha_url, see "
+                   "https://docs.ejabberd.im/admin/configuration/basic/#captcha",
+                   []);
+        _ ->
+            ok
     end.
 
 -spec get_url(binary()) -> binary().
 get_url(Str) ->
     case ejabberd_option:captcha_url() of
+	auto ->
+            Host =  ejabberd_config:get_myname(),
+            URL = get_auto_url(any, ?MODULE, Host),
+            <<URL/binary, $/, Str/binary>>;
 	undefined ->
 	    URL = parse_captcha_host(),
 	    <<URL/binary, "/captcha/", Str/binary>>;
@@ -458,6 +499,40 @@ parse_captcha_host() ->
       _ ->
 	    <<"http://", (ejabberd_config:get_myname())/binary>>
     end.
+
+get_auto_url(Tls, Module, Host) ->
+    case find_handler_port_path(Tls, Module) of
+        [] -> undefined;
+        TPPs ->
+            {ThisTls, Port, Path} = case lists:keyfind(true, 1, TPPs) of
+                                        false ->
+                                            lists:keyfind(false, 1, TPPs);
+                                        TPP ->
+                                            TPP
+                                    end,
+            Protocol = case ThisTls of
+                           false -> <<"http">>;
+                           true -> <<"https">>
+                       end,
+            <<Protocol/binary,
+              "://", Host/binary, ":",
+              (integer_to_binary(Port))/binary,
+              "/",
+              (str:join(Path, <<"/">>))/binary>>
+    end.
+
+find_handler_port_path(Tls, Module) ->
+    lists:filtermap(
+      fun({{Port, _, _},
+           ejabberd_http,
+           #{tls := ThisTls, request_handlers := Handlers}})
+            when is_integer(Port) and ((Tls == any) or (Tls == ThisTls)) ->
+              case lists:keyfind(Module, 2, Handlers) of
+                  false -> false;
+                  {Path, Module} -> {true, {ThisTls, Port, Path}}
+              end;
+         (_) -> false
+      end, ets:tab2list(ejabberd_listener)).
 
 get_transfer_protocol(PortString) ->
     PortNumber = binary_to_integer(PortString),
@@ -544,7 +619,7 @@ return(Port, TRef, Result) ->
 
 is_feature_available() ->
     case get_prog_name() of
-      Prog when is_binary(Prog) -> true;
+      PathOrModule when is_binary(PathOrModule) -> true;
       false -> false
     end.
 

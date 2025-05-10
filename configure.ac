@@ -2,15 +2,26 @@
 # Process this file with autoconf to produce a configure script.
 
 AC_PREREQ(2.59)
-AC_INIT(ejabberd, m4_esyscmd([echo `git describe --tags 2>/dev/null || echo 22.05` | sed 's/-g.*//;s/-/./' | tr -d '\012']), [ejabberd@process-one.net], [ejabberd])
-REQUIRE_ERLANG_MIN="8.3 (Erlang/OTP 19.3)"
+AC_INIT(ejabberd, m4_esyscmd([echo `git describe --tags 2>/dev/null || echo 25.04` | sed 's/-g.*//;s/-/./' | tr -d '\012']), [ejabberd@process-one.net], [ejabberd])
+
+AC_ARG_WITH(min-erlang,
+	AS_HELP_STRING([--with-min-erlang=version],[set minimal required erlang version, default to OTP25]),
+[if test "X$withval" = "X"; then
+    REQUIRE_ERLANG_MIN="13.0 (Erlang/OTP 25.0)"
+else
+    REQUIRE_ERLANG_MIN="$withval"
+fi
+], [REQUIRE_ERLANG_MIN="13.0 (Erlang/OTP 25.0)"])
+
 REQUIRE_ERLANG_MAX="100.0.0 (No Max)"
 
 AC_CONFIG_MACRO_DIR([m4])
 
 # Checks for programs.
 AC_PROG_MAKE_SET
+AC_PROG_AWK
 AC_PROG_INSTALL
+AC_PROG_MKDIR_P
 AC_PROG_SED
 
 if test "x$GCC" = "xyes"; then
@@ -28,17 +39,41 @@ fi
 ])
 
 AC_ARG_WITH(rebar,
-	AS_HELP_STRING([--with-rebar=bin],[use the rebar/rebar3/mix binary specified]),
+	AS_HELP_STRING([--with-rebar=bin],[use as build tool the rebar/rebar3/mix binary specified]),
 [if test "$withval" = "yes" -o "$withval" = "no" -o "X$with_rebar" = "X"; then
-    rebar="rebar"
+    rebar="rebar3"
 else
     rebar="$with_rebar"
 fi
-], [rebar="rebar"])
+], [rebar="unconfigured"])
 
 AC_PATH_TOOL(ERL, erl, , [${extra_erl_path}$PATH])
 AC_PATH_TOOL(ERLC, erlc, , [${extra_erl_path}$PATH])
 AC_PATH_TOOL(EPMD, epmd, , [${extra_erl_path}$PATH])
+
+AC_PATH_TOOL(REBAR, rebar, , [${extra_erl_path}$PATH])
+AC_PATH_TOOL(REBAR3, rebar3, , [${extra_erl_path}$PATH])
+AC_PATH_TOOL(ELIXIR, elixir, , [${extra_erl_path}$PATH])
+AC_PATH_TOOL(IEX, iex, , [${extra_erl_path}$PATH])
+AC_PATH_TOOL(MIX, mix, , [${extra_erl_path}$PATH])
+
+if test "$rebar" = unconfigured; then
+    if test "x$ELIXIR" = "x" -o "x$IEX" = "x" -o "x$MIX" = "x"; then
+        if test "x$REBAR3" = "x"; then
+            rebar="rebar3"
+        else
+            rebar=$REBAR3
+        fi
+    else
+        rebar=$MIX
+    fi
+fi
+if test "x$rebar" = "xrebar" -a "x$REBAR" = "x" ; then
+    rebar="./rebar"
+fi
+if test "x$rebar" = "xrebar3" -a "x$REBAR3" = "x" ; then
+    rebar="./rebar3"
+fi
 
 AC_ERLANG_NEED_ERL
 AC_ERLANG_NEED_ERLC
@@ -84,7 +119,7 @@ AC_ARG_ENABLE(debug,
 esac],[if test "x$debug" = "x"; then debug=true; fi])
 
 AC_ARG_ENABLE(elixir,
-[AS_HELP_STRING([--enable-elixir],[enable Elixir support (default: no)])],
+[AS_HELP_STRING([--enable-elixir],[enable Elixir support in Rebar3 (default: no)])],
 [case "${enableval}" in
   yes) elixir=true ;;
   no)  elixir=false ;;
@@ -112,7 +147,7 @@ esac],[full_xml=false])
 
 ENABLEGROUP=""
 AC_ARG_ENABLE(group,
-  [AS_HELP_STRING([--enable-group[[[[=GROUP]]]]], [allow this system group to start ejabberd (default: no)])],
+  [AS_HELP_STRING([--enable-group[[=GROUP]]], [specify the group of the account defined in --enable-user (default: no)])],
   [case "${enableval}" in
      yes) ENABLEGROUP=`groups |head -n 1` ;;
      no) ENABLEGROUP="" ;;
@@ -237,7 +272,7 @@ AC_ARG_ENABLE(system_deps,
 esac],[if test "x$system_deps" = "x"; then system_deps=false; fi])
 
 AC_ARG_ENABLE(tools,
-[AS_HELP_STRING([--enable-tools],[build development tools (default: no)])],
+[AS_HELP_STRING([--enable-tools],[include debugging/development tools (default: no)])],
 [case "${enableval}" in
   yes) tools=true ;;
   no)  tools=false ;;
@@ -246,7 +281,7 @@ esac],[if test "x$tools" = "x"; then tools=false; fi])
 
 ENABLEUSER=""
 AC_ARG_ENABLE(user,
-  [AS_HELP_STRING([--enable-user[[[[=USER]]]]], [allow this system user to start ejabberd (default: no)])],
+  [AS_HELP_STRING([--enable-user[[=USER]]], [allow this system user to start ejabberd (default: no)])],
   [case "${enableval}" in
      yes) ENABLEUSER=`whoami` ;;
      no) ENABLEUSER="" ;;
@@ -280,6 +315,8 @@ case "`uname`" in
   ;;
 esac
 
+AC_MSG_RESULT([build tool to use (change using --with-rebar): $rebar])
+
 AC_SUBST(roster_gateway_workaround)
 AC_SUBST(new_sql_schema)
 AC_SUBST(full_xml)
@@ -305,3 +342,28 @@ AC_SUBST(CPPFLAGS)
 AC_SUBST(LDFLAGS)
 
 AC_OUTPUT
+
+AS_CASE([$rebar],
+ [*rebar3], [
+  deps=""
+  AS_IF([test "x$stun" = "xfalse"], [deps="stun,$deps"])
+  AS_IF([test "x$sqlite" = "xfalse"], [deps="sqlite3,$deps"])
+  AS_IF([test "x$pgsql" = "xfalse"], [deps="p1_pgsql,$deps"])
+  AS_IF([test "x$mysql" = "xfalse"], [deps="p1_mysql,$deps"])
+  AS_IF([test "x$zlib" = "xfalse"], [deps="ezlib,$deps"])
+  AS_IF([test "x$sip" = "xfalse"], [deps="esip,$deps"])
+  AS_IF([test "x$redis" = "xfalse"], [deps="eredis,$deps"])
+  AS_IF([test "x$pam" = "xfalse"], [deps="epam,$deps"])
+  AS_IF([test "x$deps" = "x"], [],
+   [AC_MSG_NOTICE([unlocking disabled rebar3 dependencies: $deps])
+    $rebar unlock "$deps"])
+  deps=""
+  ERLANG_VERSION=m4_esyscmd([erl -noinput -noshell -eval 'erlang:display(list_to_integer(erlang:system_info(otp_release))), halt().'])
+  AS_IF([test "$ERLANG_VERSION" -lt "21"], [deps="luerl,$deps"])
+  AS_IF([test "$ERLANG_VERSION" -lt "22"], [deps="lager,$deps"])
+  AS_IF([test "$ERLANG_VERSION" -le "23"], [deps="jose,$deps"])
+  AS_IF([test "$ERLANG_VERSION" -ge "27"], [deps="jiffy,$deps"])
+  AS_IF([test "x$deps" = "x"], [],
+   [AC_MSG_NOTICE([unlocking rebar3 dependencies for old Erlang/OTP: $deps])
+    $rebar unlock "$deps"])
+ ])

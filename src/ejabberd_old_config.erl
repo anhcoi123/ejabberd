@@ -1,7 +1,7 @@
 %%%----------------------------------------------------------------------
 %%% Purpose: Transform old-style Erlang config to YAML config
 %%%
-%%% ejabberd, Copyright (C) 2002-2022   ProcessOne
+%%% ejabberd, Copyright (C) 2002-2025   ProcessOne
 %%%
 %%% This program is free software; you can redistribute it and/or
 %%% modify it under the terms of the GNU General Public License as
@@ -619,7 +619,7 @@ strings_to_binary(L) when is_list(L) ->
     end;
 strings_to_binary({A, B, C, D}) when
 	is_integer(A), is_integer(B), is_integer(C), is_integer(D) ->
-    {A, B, C ,D};
+    {A, B, C, D};
 strings_to_binary(T) when is_tuple(T) ->
     list_to_tuple(strings_to_binary1(tuple_to_list(T)));
 strings_to_binary(X) ->

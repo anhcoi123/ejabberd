@@ -1,5 +1,5 @@
 %%%----------------------------------------------------------------------
-%%% ejabberd, Copyright (C) 2002-2022   ProcessOne
+%%% ejabberd, Copyright (C) 2002-2025   ProcessOne
 %%%
 %%% This program is free software; you can redistribute it and/or
 %%% modify it under the terms of the GNU General Public License as
@@ -35,6 +35,10 @@
 -type shaper_rate_rule() :: {shaper_rate(), [acl:access_rule()]}.
 
 -export_type([shaper/0, shaper_rule/0, shaper_rate/0]).
+
+-ifndef(OTP_BELOW_28).
+-dialyzer([no_opaque_union]).
+-endif.
 
 %%%===================================================================
 %%% API

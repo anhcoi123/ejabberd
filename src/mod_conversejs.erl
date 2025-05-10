@@ -5,7 +5,7 @@
 %%% Created :  8 Nov 2021 by Alexey Shchepin <alexey@process-one.net>
 %%%
 %%%
-%%% ejabberd, Copyright (C) 2002-2022   ProcessOne
+%%% ejabberd, Copyright (C) 2002-2025   ProcessOne
 %%%
 %%% This program is free software; you can redistribute it and/or
 %%% modify it under the terms of the GNU General Public License as
@@ -54,8 +54,7 @@ process([], #request{method = 'GET', host = Host, raw_path = RawPath}) ->
     ExtraOptions = get_auth_options(Host)
         ++ get_register_options(Host)
         ++ get_extra_options(Host),
-    DomainRaw = gen_mod:get_module_opt(Host, ?MODULE, default_domain),
-    Domain = misc:expand_keyword(<<"@HOST@">>, DomainRaw, Host),
+    Domain = mod_conversejs_opt:default_domain(Host),
     Script = get_file_url(Host, conversejs_script,
                           <<RawPath/binary, "/converse.min.js">>,
                           <<"https://cdn.conversejs.org/dist/converse.min.js">>),
@@ -67,7 +66,6 @@ process([], #request{method = 'GET', host = Host, raw_path = RawPath}) ->
             {<<"domain_placeholder">>, Domain},
             {<<"registration_domain">>, Domain},
             {<<"assets_path">>, RawPath},
-            {<<"i18n">>, ejabberd_option:language(Host)},
             {<<"view_mode">>, <<"fullscreen">>}
            | ExtraOptions],
     Init2 =
@@ -80,6 +78,7 @@ process([], #request{method = 'GET', host = Host, raw_path = RawPath}) ->
             undefined -> Init2;
             BoshURL -> [{<<"bosh_service_url">>, BoshURL} | Init2]
         end,
+    Init4 = maps:from_list(Init3),
     {200, [html],
      [<<"<!DOCTYPE html>">>,
       <<"<html>">>,
@@ -91,7 +90,7 @@ process([], #request{method = 'GET', host = Host, raw_path = RawPath}) ->
       <<"</head>">>,
       <<"<body>">>,
       <<"<script>">>,
-      <<"converse.initialize(">>, jiffy:encode({Init3}), <<");">>,
+      <<"converse.initialize(">>, misc:json_encode(Init4), <<");">>,
       <<"</script>">>,
       <<"</body>">>,
       <<"</html>">>]};
@@ -117,7 +116,9 @@ is_served_file(_) -> false.
 
 serve(Host, LocalPath) ->
     case get_conversejs_resources(Host) of
-        undefined -> ejabberd_web:error(not_found);
+        undefined ->
+            Path = str:join(LocalPath, <<"/">>),
+            {303, [{<<"Location">>, <<"https://cdn.conversejs.org/dist/", Path/binary>>}], <<>>};
         MainPath -> serve2(LocalPath, MainPath)
     end.
 
@@ -237,12 +238,12 @@ mod_opt_type(conversejs_script) ->
 mod_opt_type(conversejs_css) ->
     econf:binary();
 mod_opt_type(default_domain) ->
-    econf:binary().
+    econf:host().
 
-mod_options(_) ->
+mod_options(Host) ->
     [{bosh_service_url, auto},
      {websocket_url, auto},
-     {default_domain, <<"@HOST@">>},
+     {default_domain, Host},
      {conversejs_resources, undefined},
      {conversejs_options, []},
      {conversejs_script, auto},
@@ -252,17 +253,15 @@ mod_doc() ->
     #{desc =>
           [?T("This module serves a simple page for the "
               "https://conversejs.org/[Converse] XMPP web browser client."), "",
-           ?T("This module is available since ejabberd 21.12."),
-           ?T("Several options were improved in ejabberd 22.05."), "",
            ?T("To use this module, in addition to adding it to the 'modules' "
               "section, you must also enable it in 'listen' -> 'ejabberd_http' -> "
-              "http://../listen-options/#request-handlers[request_handlers]."), "",
-           ?T("Make sure either 'mod_bosh' or 'ejabberd_http_ws' "
-              "http://../listen-options/#request-handlers[request_handlers] "
-              "are enabled."), "",
+              "_`listen-options.md#request_handlers|request_handlers`_."), "",
+           ?T("Make sure either _`mod_bosh`_ or _`listen.md#ejabberd_http_ws|ejabberd_http_ws`_ "
+              "are enabled in at least one 'request_handlers'."), "",
            ?T("When 'conversejs_css' and 'conversejs_script' are 'auto', "
               "by default they point to the public Converse client.")
           ],
+      note => "added in 21.12 and improved in 22.05",
       example =>
           [{?T("Manually setup WebSocket url, and use the public Converse client:"),
             ["listen:",
@@ -308,7 +307,7 @@ mod_doc() ->
             #{value => ?T("auto | WebSocketURL"),
               desc =>
                   ?T("A WebSocket URL to which Converse can connect to. "
-                     "The keyword '@HOST@' is replaced with the real virtual "
+                     "The '@HOST@' keyword is replaced with the real virtual "
                      "host name. "
                      "If set to 'auto', it will build the URL of the first "
                      "configured WebSocket request handler. "

@@ -4,7 +4,7 @@
 %%% Created : 13 Apr 2016 by Evgeny Khramtsov <ekhramtsov@process-one.net>
 %%%
 %%%
-%%% ejabberd, Copyright (C) 2002-2022   ProcessOne
+%%% ejabberd, Copyright (C) 2002-2025   ProcessOne
 %%%
 %%% This program is free software; you can redistribute it and/or
 %%% modify it under the terms of the GNU General Public License as
@@ -31,6 +31,7 @@
 -export([init/2, stop/1, get_vcard/2, set_vcard/4, search/4, remove_user/2,
 	 search_fields/1, search_reported/1, import/3, export/1]).
 -export([is_search_supported/1]).
+-export([sql_schemas/0]).
 
 -include_lib("xmpp/include/xmpp.hrl").
 -include("mod_vcard.hrl").
@@ -41,8 +42,78 @@
 %%%===================================================================
 %%% API
 %%%===================================================================
-init(_Host, _Opts) ->
+init(Host, _Opts) ->
+    ejabberd_sql_schema:update_schema(Host, ?MODULE, sql_schemas()),
     ok.
+
+sql_schemas() ->
+    [#sql_schema{
+        version = 1,
+        tables =
+            [#sql_table{
+                name = <<"vcard">>,
+                columns =
+                    [#sql_column{name = <<"username">>, type = text},
+                     #sql_column{name = <<"server_host">>, type = text},
+                     #sql_column{name = <<"vcard">>, type = {text, big}},
+                     #sql_column{name = <<"created_at">>, type = timestamp,
+                                 default = true}],
+                indices = [#sql_index{
+                              columns = [<<"server_host">>, <<"username">>],
+                              unique = true}]},
+             #sql_table{
+                name = <<"vcard_search">>,
+                columns =
+                    [#sql_column{name = <<"username">>, type = text},
+                     #sql_column{name = <<"lusername">>, type = text},
+                     #sql_column{name = <<"server_host">>, type = text},
+                     #sql_column{name = <<"fn">>, type = text},
+                     #sql_column{name = <<"lfn">>, type = text},
+                     #sql_column{name = <<"family">>, type = text},
+                     #sql_column{name = <<"lfamily">>, type = text},
+                     #sql_column{name = <<"given">>, type = text},
+                     #sql_column{name = <<"lgiven">>, type = text},
+                     #sql_column{name = <<"middle">>, type = text},
+                     #sql_column{name = <<"lmiddle">>, type = text},
+                     #sql_column{name = <<"nickname">>, type = text},
+                     #sql_column{name = <<"lnickname">>, type = text},
+                     #sql_column{name = <<"bday">>, type = text},
+                     #sql_column{name = <<"lbday">>, type = text},
+                     #sql_column{name = <<"ctry">>, type = text},
+                     #sql_column{name = <<"lctry">>, type = text},
+                     #sql_column{name = <<"locality">>, type = text},
+                     #sql_column{name = <<"llocality">>, type = text},
+                     #sql_column{name = <<"email">>, type = text},
+                     #sql_column{name = <<"lemail">>, type = text},
+                     #sql_column{name = <<"orgname">>, type = text},
+                     #sql_column{name = <<"lorgname">>, type = text},
+                     #sql_column{name = <<"orgunit">>, type = text},
+                     #sql_column{name = <<"lorgunit">>, type = text}],
+                indices = [#sql_index{
+                              columns = [<<"server_host">>, <<"lusername">>],
+                              unique = true},
+                           #sql_index{
+                              columns = [<<"server_host">>, <<"lfn">>]},
+                           #sql_index{
+                              columns = [<<"server_host">>, <<"lfamily">>]},
+                           #sql_index{
+                              columns = [<<"server_host">>, <<"lgiven">>]},
+                           #sql_index{
+                              columns = [<<"server_host">>, <<"lmiddle">>]},
+                           #sql_index{
+                              columns = [<<"server_host">>, <<"lnickname">>]},
+                           #sql_index{
+                              columns = [<<"server_host">>, <<"lbday">>]},
+                           #sql_index{
+                              columns = [<<"server_host">>, <<"lctry">>]},
+                           #sql_index{
+                              columns = [<<"server_host">>, <<"llocality">>]},
+                           #sql_index{
+                              columns = [<<"server_host">>, <<"lemail">>]},
+                           #sql_index{
+                              columns = [<<"server_host">>, <<"lorgname">>]},
+                           #sql_index{
+                              columns = [<<"server_host">>, <<"lorgunit">>]}]}]}].
 
 stop(_Host) ->
     ok.
@@ -192,7 +263,7 @@ remove_user(LUser, LServer) ->
                      " where lusername=%(LUser)s and %(LServer)H"))
       end).
 
-export(_Server) ->   
+export(_Server) ->
     [{vcard,
       fun(Host, #vcard{us = {LUser, LServer}, vcard = VCARD})
             when LServer == Host ->

@@ -7,7 +7,7 @@
 %%% Created :  5 Mar 2005 by Alexey Shchepin <alexey@process-one.net>
 %%%
 %%%
-%%% ejabberd, Copyright (C) 2002-2022   ProcessOne
+%%% ejabberd, Copyright (C) 2002-2025   ProcessOne
 %%%
 %%% This program is free software; you can redistribute it and/or
 %%% modify it under the terms of the GNU General Public License as
@@ -52,7 +52,6 @@
 -define(GROUP_CACHE, shared_roster_ldap_group_cache).
 -define(DISPLAYED_CACHE, shared_roster_ldap_displayed_cache).
 -define(LDAP_SEARCH_TIMEOUT, 5).    %% Timeout for LDAP search queries in seconds
--define(INVALID_SETTING_MSG, "~ts is not properly set! ~ts will not function.").
 
 -record(state,
 	{host = <<"">>                                :: binary(),
@@ -72,7 +71,7 @@
          user_desc = <<"">>                           :: binary(),
          user_uid = <<"">>                            :: binary(),
          uid_format = <<"">>                          :: binary(),
-	 uid_format_re                                :: undefined | re:mp(),
+	 uid_format_re                                :: undefined | misc:re_mp(),
          filter = <<"">>                              :: binary(),
          ufilter = <<"">>                             :: binary(),
          rfilter = <<"">>                             :: binary(),
@@ -109,36 +108,25 @@ depends(_Host, _Opts) ->
 %%--------------------------------------------------------------------
 %% Hooks
 %%--------------------------------------------------------------------
--spec get_user_roster([#roster{}], {binary(), binary()}) -> [#roster{}].
-get_user_roster(Items, {U, S} = US) ->
+-spec get_user_roster([#roster_item{}], {binary(), binary()}) -> [#roster_item{}].
+get_user_roster(Items, US) ->
     SRUsers = get_user_to_groups_map(US, true),
-    {NewItems1, SRUsersRest} = lists:mapfoldl(fun (Item,
-						   SRUsers1) ->
-						      {_, _, {U1, S1, _}} =
-							  Item#roster.usj,
-						      US1 = {U1, S1},
-						      case dict:find(US1,
-								     SRUsers1)
-							  of
-							{ok, GroupNames} ->
-							    {Item#roster{subscription
-									     =
-									     both,
-									 groups =
-									     Item#roster.groups ++ GroupNames,
-									 ask =
-									     none},
-							     dict:erase(US1,
-									SRUsers1)};
-							error ->
-							    {Item, SRUsers1}
-						      end
-					      end,
-					      SRUsers, Items),
-    SRItems = [#roster{usj = {U, S, {U1, S1, <<"">>}},
-		       us = US, jid = {U1, S1, <<"">>},
-		       name = get_user_name(U1, S1), subscription = both,
-		       ask = none, groups = GroupNames}
+    {NewItems1, SRUsersRest} = lists:mapfoldl(
+	fun(Item = #roster_item{jid = #jid{luser = U1, lserver = S1}}, SRUsers1) ->
+	    US1 = {U1, S1},
+	    case dict:find(US1, SRUsers1) of
+		{ok, GroupNames} ->
+		    {Item#roster_item{subscription = both,
+				      groups = Item#roster_item.groups ++ GroupNames},
+		     dict:erase(US1, SRUsers1)};
+		error ->
+		    {Item, SRUsers1}
+	    end
+	end,
+	SRUsers, Items),
+    SRItems = [#roster_item{jid = jid:make(U1, S1),
+			    name = get_user_name(U1, S1), subscription = both,
+			    ask = undefined, groups = GroupNames}
 	       || {{U1, S1}, GroupNames} <- dict:to_list(SRUsersRest)],
     SRItems ++ NewItems1.
 
@@ -406,14 +394,14 @@ get_member_jid(#state{user_jid_attr = UserJIDAttr, user_uid = UIDAttr} = State,
                                                 [{<<"%u">>, UID}])],
                            [UserJIDAttr]),
     case Entries of
-        [] ->
-            {error, error};
         [#eldap_entry{attributes = [{UserJIDAttr, [MemberJID | _]}]} | _] ->
             try jid:decode(MemberJID) of
                 #jid{luser = U, lserver = S} -> {U, S}
             catch
                 error:{bad_jid, _} -> {error, Host}
-            end
+            end;
+      _ ->
+        {error, error}
     end.
 
 extract_members(State, Extractor, AuthChecker, #eldap_entry{attributes = Attrs}, {DescAcc, JIDsAcc}) ->
@@ -689,10 +677,10 @@ mod_doc() ->
            ?T("- Connection parameters: The module also accepts the "
 	      "connection parameters, all of which default to the top-level "
 	      "parameter of the same name, if unspecified. "
-	      "See http://../ldap/#ldap-connection[LDAP Connection] "
+	      "See _`ldap.md#ldap-connection|LDAP Connection`_ "
 	      "section for more information about them."), "",
-           ?T("Check also the http://../ldap/#ldap-examples"
-	      "[Configuration examples] section to get details about "
+           ?T("Check also the _`ldap.md#ldap-examples|Configuration examples`_ "
+	      "section to get details about "
 	      "retrieving the roster, "
 	      "and configuration examples including Flat DIT and Deep DIT.")],
       opts =>
@@ -721,13 +709,13 @@ mod_doc() ->
 		     "name of roster entries (usually full names of people in "
 		     "the roster). See also the parameters 'ldap_userdesc' and "
 		     "'ldap_useruid'. For more information check the LDAP "
-		     "http://../ldap/#filters[Filters] section.")}},
+		     "_`ldap.md#filters|Filters`_ section.")}},
            {ldap_filter,
             #{desc =>
 		  ?T("Additional filter which is AND-ed together "
 		     "with \"User Filter\" and \"Group Filter\". "
 		     "For more information check the LDAP "
-		     "http://../ldap/#filters[Filters] section.")}},
+		     "_`ldap.md#filters|Filters`_ section.")}},
 	   %% Attributes:
            {ldap_groupattr,
             #{desc =>
@@ -785,8 +773,7 @@ mod_doc() ->
             #{desc =>
 		  ?T("A regex for extracting user ID from the value of the "
 		     "attribute named by 'ldap_memberattr'. Check the LDAP "
-		     "http://../ldap/#control-parameters"
-		     "[Control Parameters] section.")}},
+		     "_`ldap.md#control-parameters|Control Parameters`_ section.")}},
            {ldap_auth_check,
             #{value => "true | false",
               desc =>

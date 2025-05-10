@@ -169,7 +169,7 @@ check_iq_handlers_export({HookedFuns, _}, Exports) ->
 			case is_exported(Mod, Fun, 1, Exports) of
 			    true -> ok;
 			    false ->
-				err("~s:~B: Error: "
+				err("~s:~p: Error: "
 				    "iq handler is registered on unexported function: "
 				    "~s:~s/1~n", [File, FileNo, Mod, Fun])
 			end
@@ -184,7 +184,7 @@ analyze_iq_handlers({Add, Del}) ->
 			case maps:is_key(Handler, Del) of
 			    true -> ok;
 			    false ->
-				err("~s:~B: Error: "
+				err("~s:~p: Error: "
 				    "iq handler is added but not removed~n",
 				    [File, FileNo])
 			end
@@ -197,7 +197,7 @@ analyze_iq_handlers({Add, Del}) ->
 			case maps:is_key(Handler, Add) of
 			    true -> ok;
 			    false ->
-				err("~s:~B: Error: "
+				err("~s:~p: Error: "
 				    "iq handler is removed but not added~n",
 				    [File, FileNo])
 			end
@@ -224,8 +224,8 @@ analyze_hooks({Add, Del}) ->
 	      case maps:is_key(Key, Del1) of
 		  true -> ok;
 		  false ->
-		      err("~s:~B: Error: "
-			  "hook ~s->~s->~s is added but was never removed~n",
+		      err("~s:~p: Error: "
+			  "hook ~s->~s->~s is added but was never deleted~n",
 			  [File, FileNo, Hook, Mod, Fun])
 	      end
       end, maps:to_list(Add1)),
@@ -234,8 +234,8 @@ analyze_hooks({Add, Del}) ->
 	      case maps:is_key(Key, Add1) of
 		  true -> ok;
 		  false ->
-		      err("~s:~B: Error: "
-			  "hook ~s->~s->~s is removed but was never added~n",
+		      err("~s:~p: Error: "
+			  "hook ~s->~s->~s is deleted but was never added~n",
 			  [File, FileNo, Hook, Mod, Fun])
 	      end
       end, maps:to_list(Del1)).
@@ -304,6 +304,8 @@ is_exported(Mod, Fun, Arity, Exports) ->
 warn_type({var, _, 'Type'}, #state{module = mod_delegation}, "not an atom") ->
     ok;
 warn_type({var, _, 'NS'}, #state{module = mod_delegation}, "not a binary") ->
+    ok;
+warn_type({var, _, _}, #state{module = gen_mod}, _) ->
     ok;
 warn_type(Form, State, Warning) ->
     log("~s:~p: Warning: " ++ Warning ++ ": ~s~n",

@@ -5,7 +5,7 @@
 %%% Created : 16 Nov 2002 by Alexey Shchepin <alexey@process-one.net>
 %%%
 %%%
-%%% ejabberd, Copyright (C) 2002-2022   ProcessOne
+%%% ejabberd, Copyright (C) 2002-2025   ProcessOne
 %%%
 %%% This program is free software; you can redistribute it and/or
 %%% modify it under the terms of the GNU General Public License as
@@ -27,15 +27,22 @@
 -author('alexey@process-one.net').
 -compile({no_auto_import, [{halt, 0}]}).
 
--protocol({xep, 4, '2.9'}).
--protocol({xep, 86, '1.0'}).
--protocol({xep, 106, '1.1'}).
--protocol({xep, 170, '1.0'}).
--protocol({xep, 205, '1.0'}).
--protocol({xep, 212, '1.0'}).
--protocol({xep, 216, '1.0'}).
--protocol({xep, 243, '1.0'}).
--protocol({xep, 270, '1.0'}).
+-protocol({rfc, 6122}).
+-protocol({rfc, 7590}).
+-protocol({xep, 4, '2.9', '0.5.0', "complete", ""}).
+-protocol({xep, 59, '1.0', '2.1.0', "complete", ""}).
+-protocol({xep, 82, '1.1.1', '2.1.0', "complete", ""}).
+-protocol({xep, 86, '1.0', '0.5.0', "complete", ""}).
+-protocol({xep, 106, '1.1', '0.5.0', "complete", ""}).
+-protocol({xep, 170, '1.0', '17.12', "complete", ""}).
+-protocol({xep, 178, '1.1', '17.03', "complete", ""}).
+-protocol({xep, 205, '1.0', '1.1.2', "complete", ""}).
+-protocol({xep, 368, '1.1.0', '17.09', "complete", ""}).
+-protocol({xep, 386, '0.3.0', '24.02', "complete", ""}).
+-protocol({xep, 388, '0.4.0', '24.02', "complete", ""}).
+-protocol({xep, 440, '0.4.0', '24.02', "complete", ""}).
+-protocol({xep, 474, '0.4.0', '24.02', "complete", "0.4.0 since 25.03"}).
+-protocol({xep, 485, '0.2.0', '24.02', "complete", "mod_pubsub_serverinfo in ejabberd-contrib.git"}).
 
 -export([start/0, stop/0, halt/0, start_app/1, start_app/2,
 	 get_pid_file/0, check_apps/0, module_name/1, is_loaded/0]).
@@ -43,7 +50,10 @@
 -include("logger.hrl").
 
 start() ->
-    application:ensure_all_started(ejabberd).
+    case application:ensure_all_started(ejabberd) of
+      {error, Err} -> error_logger:error_msg("Failed to start ejabberd application: ~p", [Err]);
+      Ok -> Ok
+    end.
 
 stop() ->
     application:stop(ejabberd).
@@ -129,7 +139,7 @@ check_apps() ->
       fun() ->
 	      Apps = [ejabberd |
 		      [App || {App, _, _} <- application:which_applications(),
-			      App /= ejabberd]],
+			      App /= ejabberd, App /= hex]],
 	      ?DEBUG("Checking consistency of applications: ~ts",
 		     [misc:join_atoms(Apps, <<", ">>)]),
 	      misc:peach(
@@ -152,11 +162,11 @@ exit_or_halt(Reason, StartFlag) ->
 
 get_module_file(App, Mod) ->
     BaseName = atom_to_list(Mod),
-    case code:lib_dir(App, ebin) of
+    case code:lib_dir(App) of
         {error, _} ->
             BaseName;
         Dir ->
-            filename:join([Dir, BaseName ++ ".beam"])
+            filename:join([Dir, "ebin", BaseName ++ ".beam"])
     end.
 
 module_name([Dir, _, <<H,_/binary>> | _] = Mod) when H >= 65, H =< 90 ->
@@ -166,6 +176,15 @@ module_name([Dir, _, <<H,_/binary>> | _] = Mod) when H >= 65, H =< 90 ->
 	Lib -> <<"Elixir.Ejabberd.", Lib/binary, ".">>
     end,
     misc:binary_to_atom(<<Prefix/binary, Module/binary>>);
+
+module_name([<<"auth">> | T] = Mod) ->
+    case hd(T) of
+        %% T already starts with "Elixir" if an Elixir module is
+        %% loaded with that name, as per `econf:db_type/1`
+        <<"Elixir", _/binary>> ->  misc:binary_to_atom(hd(T));
+        _ -> module_name([<<"ejabberd">>] ++ Mod)
+    end;
+
 module_name([<<"ejabberd">> | _] = Mod) ->
     Module = str:join([erlang_name(M) || M<-Mod], $_),
     misc:binary_to_atom(Module);

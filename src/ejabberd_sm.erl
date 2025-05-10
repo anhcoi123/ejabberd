@@ -5,7 +5,7 @@
 %%% Created : 24 Nov 2002 by Alexey Shchepin <alexey@process-one.net>
 %%%
 %%%
-%%% ejabberd, Copyright (C) 2002-2022   ProcessOne
+%%% ejabberd, Copyright (C) 2002-2025   ProcessOne
 %%%
 %%% This program is free software; you can redistribute it and/or
 %%% modify it under the terms of the GNU General Public License as
@@ -39,6 +39,7 @@
 	 route/2,
 	 open_session/5,
 	 open_session/6,
+	 open_session/7,
 	 close_session/4,
 	 check_in_subscription/2,
 	 bounce_offline_message/1,
@@ -55,11 +56,14 @@
 	 get_vh_session_number/1,
 	 get_vh_by_backend/1,
 	 force_update_presence/1,
+	 reset_vcard_xupdate_resend_presence/1,
 	 connected_users/0,
 	 connected_users_number/0,
 	 user_resources/2,
 	 kick_user/2,
 	 kick_user/3,
+	 kick_user_restuple/2,
+	 kick_users/1,
 	 get_session_pid/3,
 	 get_session_sid/3,
 	 get_session_sids/2,
@@ -147,14 +151,20 @@ route(Packet) ->
 	    ok
     end.
 
--spec open_session(sid(), binary(), binary(), binary(), prio(), info()) -> ok.
 
-open_session(SID, User, Server, Resource, Priority, Info) ->
+-spec open_session(sid(), binary(), binary(), binary(), prio(), info(),
+		   {binary(), binary()} | undefined) -> ok.
+open_session(SID, User, Server, Resource, Priority, Info, Bind2Tag) ->
     set_session(SID, User, Server, Resource, Priority, Info),
-    check_for_sessions_to_replace(User, Server, Resource),
+    check_for_sessions_to_replace(User, Server, Resource, Bind2Tag),
     JID = jid:make(User, Server, Resource),
     ejabberd_hooks:run(sm_register_connection_hook,
 		       JID#jid.lserver, [SID, JID, Info]).
+
+-spec open_session(sid(), binary(), binary(), binary(), prio(), info()) -> ok.
+
+open_session(SID, User, Server, Resource, Priority, Info) ->
+    open_session(SID, User, Server, Resource, Priority, Info, undefined).
 
 -spec open_session(sid(), binary(), binary(), binary(), info()) -> ok.
 
@@ -197,6 +207,18 @@ bounce_offline_message(Acc) ->
     Acc.
 
 -spec bounce_sm_packet({bounce | term(), stanza()}) -> any().
+bounce_sm_packet({bounce, #message{meta = #{ignore_sm_bounce := true}} = Packet} = Acc) ->
+    ?DEBUG("Dropping packet to unavailable resource:~n~ts",
+	   [xmpp:pp(Packet)]),
+    Acc;
+bounce_sm_packet({bounce, #iq{meta = #{ignore_sm_bounce := true}} = Packet} = Acc) ->
+    ?DEBUG("Dropping packet to unavailable resource:~n~ts",
+	   [xmpp:pp(Packet)]),
+    Acc;
+bounce_sm_packet({bounce, #presence{meta = #{ignore_sm_bounce := true}} = Packet} = Acc) ->
+    ?DEBUG("Dropping packet to unavailable resource:~n~ts",
+	   [xmpp:pp(Packet)]),
+    Acc;
 bounce_sm_packet({bounce, Packet} = Acc) ->
     Lang = xmpp:get_lang(Packet),
     Txt = ?T("User session not found"),
@@ -452,6 +474,13 @@ c2s_handle_info(#{lang := Lang} = State, replaced) ->
     State1 = State#{replaced => true},
     Err = xmpp:serr_conflict(?T("Replaced by new connection"), Lang),
     {stop, ejabberd_c2s:send(State1, Err)};
+c2s_handle_info(#{lang := Lang, bind2_session_id := {Tag, _}} = State,
+		{replaced_with_bind_tag, Bind2Tag}) when Tag == Bind2Tag ->
+    State1 = State#{replaced => true},
+    Err = xmpp:serr_conflict(?T("Replaced by new connection"), Lang),
+    {stop, ejabberd_c2s:send(State1, Err)};
+c2s_handle_info(State, {replaced_with_bind_tag, _}) ->
+    State;
 c2s_handle_info(#{lang := Lang} = State, kick) ->
     Err = xmpp:serr_policy_violation(?T("has been kicked"), Lang),
     {stop, ejabberd_c2s:send(State, Err)};
@@ -826,16 +855,18 @@ clean_session_list([S1, S2 | Rest], Res) ->
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
 %% On new session, check if some existing connections need to be replace
--spec check_for_sessions_to_replace(binary(), binary(), binary()) -> ok | replaced.
-check_for_sessions_to_replace(User, Server, Resource) ->
+-spec check_for_sessions_to_replace(binary(), binary(), binary(),
+				    {binary(), binary()} | undefined) -> ok | replaced.
+check_for_sessions_to_replace(User, Server, Resource, Bind2Tag) ->
     LUser = jid:nodeprep(User),
     LServer = jid:nameprep(Server),
     LResource = jid:resourceprep(Resource),
-    check_existing_resources(LUser, LServer, LResource),
+    check_existing_resources(LUser, LServer, LResource, Bind2Tag),
     check_max_sessions(LUser, LServer).
 
--spec check_existing_resources(binary(), binary(), binary()) -> ok.
-check_existing_resources(LUser, LServer, LResource) ->
+-spec check_existing_resources(binary(), binary(), binary(),
+			       {binary(), binary()} | undefined) -> ok.
+check_existing_resources(LUser, LServer, LResource, undefined) ->
     Mod = get_sm_backend(LServer),
     Ss = get_sessions(Mod, LUser, LServer, LResource),
     if Ss == [] -> ok;
@@ -847,7 +878,20 @@ check_existing_resources(LUser, LServer, LResource) ->
 			     (_) -> ok
 			 end,
 			 SIDs)
-    end.
+    end;
+check_existing_resources(LUser, LServer, LResource, {Tag, Hash}) ->
+    Mod = get_sm_backend(LServer),
+    Ss = get_sessions(Mod, LUser, LServer),
+    lists:foreach(
+	fun(#session{sid = {_, Pid}, usr = {_, _, Res}})
+	       when Pid /= self(), Res == LResource ->
+	       ejabberd_c2s:route(Pid, replaced);
+	   (#session{sid = {_, Pid}, usr = {_, _, Res}})
+	       when Pid /= self(), binary_part(Res, size(Res), -size(Hash)) == Hash ->
+	       ejabberd_c2s:route(Pid, {replaced_with_bind_tag, Tag});
+	   (_) ->
+	       ok
+	end, Ss).
 
 -spec is_existing_resource(binary(), binary(), binary()) -> boolean().
 
@@ -896,6 +940,15 @@ force_update_presence({LUser, LServer}) ->
 			  ejabberd_c2s:resend_presence(Pid)
 		  end,
 		  Ss).
+
+-spec reset_vcard_xupdate_resend_presence({binary(), binary()}) -> ok.
+reset_vcard_xupdate_resend_presence({LUser, LServer}) ->
+    Mod = get_sm_backend(LServer),
+    Ss = get_sessions(Mod, LUser, LServer),
+    lists:foreach(
+	fun(#session{sid = {_, Pid}}) ->
+	    ejabberd_c2s:reset_vcard_xupdate_resend_presence(Pid)
+	end, Ss).
 
 -spec get_sm_backend(binary()) -> module().
 
@@ -982,8 +1035,8 @@ get_commands_spec() ->
 			desc = "List all established sessions",
                         policy = admin,
 			module = ?MODULE, function = connected_users, args = [],
-			result_desc = "List of users sessions",
-			result_example = [<<"user1@example.com">>, <<"user2@example.com">>],
+			result_desc = "List of users sessions full JID",
+			result_example = [<<"user1@example.com/Home">>, <<"user2@example.com/54134">>],
 			result = {connected_users, {list, {sessions, string}}}},
      #ejabberd_commands{name = connected_users_number, tags = [session, statistics],
 			desc = "Get the number of established sessions",
@@ -1008,7 +1061,30 @@ get_commands_spec() ->
 			args_example = [<<"user1">>, <<"example.com">>],
 			result_desc = "Number of resources that were kicked",
 			result_example = 3,
-			result = {num_resources, integer}}].
+			result = {num_resources, integer}},
+
+     #ejabberd_commands{name = kick_user, tags = [session],
+			desc = "Disconnect user's active sessions",
+			module = ?MODULE, function = kick_user_restuple,
+			version = 2,
+			note = "modified in 24.06",
+			args = [{user, binary}, {host, binary}],
+			args_desc = ["User name", "Server name"],
+			args_example = [<<"user1">>, <<"example.com">>],
+			result_desc = "The result text indicates the number of sessions that were kicked",
+			result_example = {ok, <<"Kicked sessions: 2">>},
+			result = {res, restuple}},
+
+    #ejabberd_commands{name = kick_users, tags = [session],
+			desc = "Disconnect all given host users' active sessions",
+			module = ?MODULE, function = kick_users,
+			note = "added in 25.04",
+			args = [{host, binary}],
+			args_desc = ["Server name"],
+			args_example = [<<"example.com">>],
+			result_desc = "Number of sessions that were kicked",
+			result_example = 3,
+			result = {num_sessions, integer}}].
 
 -spec connected_users() -> [binary()].
 
@@ -1042,6 +1118,15 @@ kick_user(User, Server, Resource) ->
 	none -> false;
 	Pid -> ejabberd_c2s:route(Pid, kick)
     end.
+
+kick_user_restuple(User, Server) ->
+    NumberBin = integer_to_binary(kick_user(User, Server)),
+    {ok, <<"Kicked sessions: ", NumberBin/binary>>}.
+
+-spec kick_users(binary()) -> non_neg_integer().
+kick_users(Server) ->
+    length([kick_user(U, S, R) || {U, S, R} <-get_vh_session_list(Server)]).
+
 
 make_sid() ->
     {misc:unique_timestamp(), self()}.

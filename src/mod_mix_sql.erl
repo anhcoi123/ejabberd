@@ -27,6 +27,7 @@
 -export([set_channel/6, get_channels/2, get_channel/3, del_channel/3]).
 -export([set_participant/6, get_participant/4, get_participants/3, del_participant/4]).
 -export([subscribe/5, unsubscribe/4, unsubscribe/5, get_subscribed/4]).
+-export([sql_schemas/0]).
 
 -include("logger.hrl").
 -include("ejabberd_sql_pt.hrl").
@@ -34,9 +35,64 @@
 %%%===================================================================
 %%% API
 %%%===================================================================
-init(_Host, _Opts) ->
-    %% TODO
+init(Host, _Opts) ->
+    ejabberd_sql_schema:update_schema(Host, ?MODULE, sql_schemas()),
     ok.
+
+sql_schemas() ->
+    [#sql_schema{
+        version = 1,
+        tables =
+            [#sql_table{
+                name = <<"mix_channel">>,
+                columns =
+                    [#sql_column{name = <<"channel">>, type = text},
+                     #sql_column{name = <<"service">>, type = text},
+                     #sql_column{name = <<"username">>, type = text},
+                     #sql_column{name = <<"domain">>, type = text},
+                     #sql_column{name = <<"jid">>, type = text},
+                     #sql_column{name = <<"hidden">>, type = boolean},
+                     #sql_column{name = <<"hmac_key">>, type = text},
+                     #sql_column{name = <<"created_at">>, type = timestamp,
+                                 default = true}],
+                indices = [#sql_index{
+                              columns = [<<"channel">>, <<"service">>],
+                              unique = true},
+                           #sql_index{
+                              columns = [<<"service">>]}]},
+             #sql_table{
+                name = <<"mix_participant">>,
+                columns =
+                    [#sql_column{name = <<"channel">>, type = text},
+                     #sql_column{name = <<"service">>, type = text},
+                     #sql_column{name = <<"username">>, type = text},
+                     #sql_column{name = <<"domain">>, type = text},
+                     #sql_column{name = <<"jid">>, type = text},
+                     #sql_column{name = <<"id">>, type = text},
+                     #sql_column{name = <<"nick">>, type = text},
+                     #sql_column{name = <<"created_at">>, type = timestamp,
+                                 default = true}],
+                indices = [#sql_index{
+                              columns = [<<"channel">>, <<"service">>,
+                                         <<"username">>, <<"domain">>],
+                              unique = true}]},
+             #sql_table{
+                name = <<"mix_subscription">>,
+                columns =
+                    [#sql_column{name = <<"channel">>, type = text},
+                     #sql_column{name = <<"service">>, type = {text, 75}},
+                     #sql_column{name = <<"username">>, type = text},
+                     #sql_column{name = <<"domain">>, type = {text, 75}},
+                     #sql_column{name = <<"node">>, type = text},
+                     #sql_column{name = <<"jid">>, type = text}],
+                indices = [#sql_index{
+                              columns = [<<"channel">>, <<"service">>,
+                                         <<"username">>, <<"domain">>,
+                                         <<"node">>],
+                              unique = true},
+                           #sql_index{
+                              columns = [<<"channel">>, <<"service">>,
+                                         <<"node">>]}]}]}].
 
 set_channel(LServer, Channel, Service, CreatorJID, Hidden, Key) ->
     {User, Domain, _} = jid:tolower(CreatorJID),

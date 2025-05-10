@@ -5,7 +5,7 @@
 %%% Created : 15 Jul 2017 by Holger Weiss <holger@zedat.fu-berlin.de>
 %%%
 %%%
-%%% ejabberd, Copyright (C) 2017-2022 ProcessOne
+%%% ejabberd, Copyright (C) 2017-2025 ProcessOne
 %%%
 %%% This program is free software; you can redistribute it and/or
 %%% modify it under the terms of the GNU General Public License as
@@ -32,8 +32,9 @@
 -export([start/2, stop/1, reload/3, mod_opt_type/1, mod_options/1, depends/2]).
 -export([mod_doc/0]).
 %% ejabberd_hooks callbacks.
--export([c2s_session_pending/1, c2s_session_resumed/1, c2s_copy_session/2,
-	 c2s_handle_cast/2, c2s_handle_info/2, c2s_stanza/3]).
+-export([ejabberd_started/0, c2s_session_pending/1, c2s_session_resumed/1,
+	 c2s_copy_session/2, c2s_handle_cast/2, c2s_handle_info/2,
+	 c2s_stanza/3]).
 
 -include("logger.hrl").
 -include_lib("xmpp/include/xmpp.hrl").
@@ -46,29 +47,26 @@
 %%--------------------------------------------------------------------
 %% gen_mod callbacks.
 %%--------------------------------------------------------------------
--spec start(binary(), gen_mod:opts()) -> ok.
-start(Host, Opts) ->
-    case mod_push_keepalive_opt:wake_on_start(Opts) of
-	true ->
-	    wake_all(Host);
-	false ->
-	    ok
-    end,
-    register_hooks(Host).
+-spec start(binary(), gen_mod:opts()) -> {ok, [gen_mod:registration()]}.
+start(_Host, _Opts) ->
+    {ok,
+     [{hook, c2s_session_pending, c2s_session_pending, 50},
+      {hook, c2s_session_resumed, c2s_session_resumed, 50},
+      {hook, c2s_copy_session, c2s_copy_session, 50},
+      {hook, c2s_handle_cast, c2s_handle_cast, 40},
+      {hook, c2s_handle_info, c2s_handle_info, 50},
+      {hook, c2s_handle_send, c2s_stanza, 50},
+      %% Wait for ejabberd_pkix before running our ejabberd_started/0, so that we
+      %% don't initiate s2s connections before certificates are loaded:
+      {hook, ejabberd_started, ejabberd_started, 90, global}]}.
 
 -spec stop(binary()) -> ok.
-stop(Host) ->
-    unregister_hooks(Host).
+stop(_Host) ->
+    ok.
 
 -spec reload(binary(), gen_mod:opts(), gen_mod:opts()) -> ok.
-reload(Host, NewOpts, OldOpts) ->
-    case {mod_push_keepalive_opt:wake_on_start(NewOpts),
-	  mod_push_keepalive_opt:wake_on_start(OldOpts)} of
-	{true, false} ->
-	    wake_all(Host);
-	_ ->
-	    ok
-    end.
+reload(_Host, _NewOpts, _OldOpts) ->
+    ok.
 
 -spec depends(binary(), gen_mod:opts()) -> [{module(), hard | soft}].
 depends(_Host, _Opts) ->
@@ -129,39 +127,6 @@ mod_doc() ->
                      "is generated shortly before the session would time "
                      "out as per the 'resume_timeout' option. "
                      "The default value is 'true'.")}}]}.
-
-%%--------------------------------------------------------------------
-%% Register/unregister hooks.
-%%--------------------------------------------------------------------
--spec register_hooks(binary()) -> ok.
-register_hooks(Host) ->
-    ejabberd_hooks:add(c2s_session_pending, Host, ?MODULE,
-		       c2s_session_pending, 50),
-    ejabberd_hooks:add(c2s_session_resumed, Host, ?MODULE,
-		       c2s_session_resumed, 50),
-    ejabberd_hooks:add(c2s_copy_session, Host, ?MODULE,
-		       c2s_copy_session, 50),
-    ejabberd_hooks:add(c2s_handle_cast, Host, ?MODULE,
-		       c2s_handle_cast, 40),
-    ejabberd_hooks:add(c2s_handle_info, Host, ?MODULE,
-		       c2s_handle_info, 50),
-    ejabberd_hooks:add(c2s_handle_send, Host, ?MODULE,
-		       c2s_stanza, 50).
-
--spec unregister_hooks(binary()) -> ok.
-unregister_hooks(Host) ->
-    ejabberd_hooks:delete(c2s_session_pending, Host, ?MODULE,
-			  c2s_session_pending, 50),
-    ejabberd_hooks:delete(c2s_session_resumed, Host, ?MODULE,
-			  c2s_session_resumed, 50),
-    ejabberd_hooks:delete(c2s_copy_session, Host, ?MODULE,
-			  c2s_copy_session, 50),
-    ejabberd_hooks:delete(c2s_handle_cast, Host, ?MODULE,
-			  c2s_handle_cast, 40),
-    ejabberd_hooks:delete(c2s_handle_info, Host, ?MODULE,
-			  c2s_handle_info, 50),
-    ejabberd_hooks:delete(c2s_handle_send, Host, ?MODULE,
-			  c2s_stanza, 50).
 
 %%--------------------------------------------------------------------
 %% Hook callbacks.
@@ -232,6 +197,15 @@ c2s_handle_info(#{push_enabled := true, mgmt_state := pending,
     {stop, State};
 c2s_handle_info(State, _) ->
     State.
+
+-spec ejabberd_started() -> ok.
+ejabberd_started() ->
+    Pred = fun(Host) ->
+		   gen_mod:is_loaded(Host, ?MODULE) andalso
+		       mod_push_keepalive_opt:wake_on_start(Host)
+	   end,
+    [wake_all(Host) || Host <- ejabberd_config:get_option(hosts), Pred(Host)],
+    ok.
 
 %%--------------------------------------------------------------------
 %% Internal functions.

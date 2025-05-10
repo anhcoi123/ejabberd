@@ -8,7 +8,7 @@
 %%% Created : 30 Mar 2017 by Evgeny Khramtsov <ekhramtsov@process-one.net>
 %%%
 %%%
-%%% ejabberd, Copyright (C) 2002-2022   ProcessOne
+%%% ejabberd, Copyright (C) 2002-2025   ProcessOne
 %%%
 %%% This program is free software; you can redistribute it and/or
 %%% modify it under the terms of the GNU General Public License as
@@ -41,9 +41,11 @@
 	 intersection/2, format_val/1, cancel_timer/1, unique_timestamp/0,
 	 is_mucsub_message/1, best_match/2, pmap/2, peach/2, format_exception/4,
 	 get_my_ipv4_address/0, get_my_ipv6_address/0, parse_ip_mask/1,
-	 crypto_hmac/3, crypto_hmac/4, uri_parse/1,
+	 crypto_hmac/3, crypto_hmac/4, uri_parse/1, uri_parse/2, uri_quote/1,
+         json_encode/1, json_decode/1, json_encode_with_kv_lists/1,
+	 set_proc_label/1,
 	 match_ip_mask/3, format_hosts_list/1, format_cycle/1, delete_dir/1,
-	 logical_processors/0]).
+	 semver_to_xxyy/1, logical_processors/0, get_mucsub_event_type/1]).
 
 %% Deprecated functions
 -export([decode_base64/1, encode_base64/1]).
@@ -54,6 +56,17 @@
 -include_lib("xmpp/include/xmpp.hrl").
 -include_lib("kernel/include/file.hrl").
 
+-ifdef(OTP_BELOW_27).
+%% Copied from erlang/otp/lib/stdlib/src/re.erl
+-type re_mp() :: {re_pattern, _, _, _, _}.
+-type json_value() :: jiffy:json_value().
+-else.
+-type re_mp() :: re:mp().
+-type json_value() :: json:encode_value().
+-endif.
+-export_type([re_mp/0]).
+-export_type([json_value/0]).
+
 -type distance_cache() :: #{{string(), string()} => non_neg_integer()}.
 
 -spec uri_parse(binary()|string()) -> {ok, string(), string(), string(), number(), string(), string()} | {error, term()}.
@@ -61,26 +74,53 @@
 uri_parse(URL) when is_binary(URL) ->
     uri_parse(binary_to_list(URL));
 uri_parse(URL) ->
-    case http_uri:parse(URL) of
+    uri_parse(URL, []).
+
+uri_parse(URL, Protocols) when is_binary(URL) ->
+    uri_parse(binary_to_list(URL), Protocols);
+uri_parse(URL, Protocols) ->
+    case http_uri:parse(URL, [{scheme_defaults, Protocols}]) of
 	{ok, {Scheme, UserInfo, Host, Port, Path, Query}} ->
 	    {ok, atom_to_list(Scheme), UserInfo, Host, Port, Path, Query};
 	{error, _} = E ->
 	    E
     end.
+
 -else.
 uri_parse(URL) when is_binary(URL) ->
     uri_parse(binary_to_list(URL));
 uri_parse(URL) ->
+    uri_parse(URL, [{http, 80}, {https, 443}]).
+
+uri_parse(URL, Protocols) when is_binary(URL) ->
+    uri_parse(binary_to_list(URL), Protocols);
+uri_parse(URL, Protocols) ->
     case uri_string:parse(URL) of
 	#{scheme := Scheme, host := Host, port := Port, path := Path} = M1 ->
 	    {ok, Scheme, maps:get(userinfo, M1, ""), Host, Port, Path, maps:get(query, M1, "")};
-	#{scheme := "https", host := Host, path := Path} = M2 ->
-	    {ok, "https", maps:get(userinfo, M2, ""), Host, 443, Path, maps:get(query, M2, "")};
-	#{scheme := "http", host := Host, path := Path} = M3 ->
-	    {ok, "http", maps:get(userinfo, M3, ""), Host, 80, Path, maps:get(query, M3, "")};
+	#{scheme := Scheme, host := Host, path := Path} = M2 ->
+	    case lists:keyfind(list_to_atom(Scheme), 1, Protocols) of
+		{_, Port} ->
+		    {ok, Scheme, maps:get(userinfo, M2, ""), Host, Port, Path, maps:get(query, M2, "")};
+		_ ->
+		    {error, unknown_protocol}
+	    end;
 	{error, Atom, _} ->
 	    {error, Atom}
     end.
+-endif.
+
+-ifdef(OTP_BELOW_25).
+-ifdef(OTP_BELOW_24).
+uri_quote(Data) ->
+    Data.
+-else.
+uri_quote(Data) ->
+    http_uri:encode(Data).
+-endif.
+-else.
+uri_quote(Data) ->
+    uri_string:quote(Data).
 -endif.
 
 -ifdef(USE_OLD_CRYPTO_HMAC).
@@ -89,6 +129,27 @@ crypto_hmac(Type, Key, Data, MacL) -> crypto:hmac(Type, Key, Data, MacL).
 -else.
 crypto_hmac(Type, Key, Data) -> crypto:mac(hmac, Type, Key, Data).
 crypto_hmac(Type, Key, Data, MacL) -> crypto:macN(hmac, Type, Key, Data, MacL).
+-endif.
+
+-ifdef(OTP_BELOW_27).
+json_encode_with_kv_lists(Term) ->
+    jiffy:encode(Term).
+json_encode(Term) ->
+    jiffy:encode(Term).
+json_decode(Bin) ->
+    jiffy:decode(Bin, [return_maps]).
+-else.
+json_encode_with_kv_lists(Term) ->
+    iolist_to_binary(json:encode(Term,
+		     fun({Val}, Encoder) when is_list(Val) ->
+			 json:encode_key_value_list(Val, Encoder);
+			(Val, Encoder) ->
+			    json:encode_value(Val, Encoder)
+		     end)).
+json_encode(Term) ->
+    iolist_to_binary(json:encode(Term)).
+json_decode(Bin) ->
+    json:decode(Bin).
 -endif.
 
 %%%===================================================================
@@ -154,7 +215,11 @@ unwrap_mucsub_message(_Packet) ->
     false.
 
 -spec is_mucsub_message(xmpp_element()) -> boolean().
-is_mucsub_message(#message{} = OuterMsg) ->
+is_mucsub_message(Packet) ->
+    get_mucsub_event_type(Packet) /= false.
+
+-spec get_mucsub_event_type(xmpp_element()) -> binary() | false.
+get_mucsub_event_type(#message{} = OuterMsg) ->
     case xmpp:get_subtag(OuterMsg, #ps_event{}) of
 	#ps_event{
 	    items = #ps_items{
@@ -166,18 +231,18 @@ is_mucsub_message(#message{} = OuterMsg) ->
 		 Node == ?NS_MUCSUB_NODES_PARTICIPANTS;
 		 Node == ?NS_MUCSUB_NODES_PRESENCE;
 		 Node == ?NS_MUCSUB_NODES_SUBSCRIBERS ->
-	    true;
+	    Node;
 	_ ->
 	    false
     end;
-is_mucsub_message(_Packet) ->
+get_mucsub_event_type(_Packet) ->
     false.
 
 -spec is_standalone_chat_state(stanza()) -> boolean().
 is_standalone_chat_state(Stanza) ->
     case unwrap_carbon(Stanza) of
 	#message{body = [], subject = [], sub_els = Els} ->
-	    IgnoreNS = [?NS_CHATSTATES, ?NS_DELAY, ?NS_EVENT],
+	    IgnoreNS = [?NS_CHATSTATES, ?NS_DELAY, ?NS_EVENT, ?NS_HINTS],
 	    Stripped = [El || El <- Els,
 			      not lists:member(xmpp:get_ns(El), IgnoreNS)],
 	    Stripped == [];
@@ -220,13 +285,13 @@ encode_base64(Data) ->
 -spec ip_to_list(inet:ip_address() | undefined |
                  {inet:ip_address(), inet:port_number()}) -> binary().
 
-ip_to_list({local, _}) ->
-    <<"unix">>;
 ip_to_list({IP, _Port}) ->
     ip_to_list(IP);
 %% This function clause could use inet_parse too:
 ip_to_list(undefined) ->
     <<"unknown">>;
+ip_to_list(local) ->
+    <<"unix">>;
 ip_to_list(IP) ->
     list_to_binary(inet_parse:ntoa(IP)).
 
@@ -260,6 +325,9 @@ binary_to_atom(Bin) ->
 tuple_to_binary(T) ->
     iolist_to_binary(tuple_to_list(T)).
 
+%% erlang:atom_to_binary/1 is available since OTP 23
+%% https://www.erlang.org/doc/apps/erts/erlang#atom_to_binary/1
+%% Let's use /2 for backwards compatibility.
 atom_to_binary(A) ->
     erlang:atom_to_binary(A, utf8).
 
@@ -621,6 +689,16 @@ delete_dir(Dir) ->
 	    {error, Error}
     end.
 
+-spec semver_to_xxyy(binary()) -> binary().
+semver_to_xxyy(<<Y1, Y2, $., M2, $., $0>>) ->
+    <<Y1, Y2, $., $0, M2>>;
+semver_to_xxyy(<<Y1, Y2, $., M2, $., Patch/binary>>) ->
+    <<Y1, Y2, $., $0, M2, $., Patch/binary>>;
+semver_to_xxyy(<<Y1, Y2, $., M1, M2, $., $0>>) ->
+    <<Y1, Y2, $., M1, M2>>;
+semver_to_xxyy(Version) when is_binary(Version) ->
+    Version.
+
 %%%===================================================================
 %%% Internal functions
 %%%===================================================================
@@ -715,3 +793,11 @@ to_string(B) when is_binary(B) ->
     binary_to_list(B);
 to_string(S) ->
     S.
+
+-ifdef(OTP_BELOW_27).
+set_proc_label(_Label) ->
+    ok.
+-else.
+set_proc_label(Label) ->
+    proc_lib:set_label(Label).
+-endif.

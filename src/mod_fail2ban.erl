@@ -5,7 +5,7 @@
 %%% Created : 15 Aug 2014 by Evgeny Khramtsov <ekhramtsov@process-one.net>
 %%%
 %%%
-%%% ejabberd, Copyright (C) 2014-2022   ProcessOne
+%%% ejabberd, Copyright (C) 2014-2025   ProcessOne
 %%%
 %%% This program is free software; you can redistribute it and/or
 %%% modify it under the terms of the GNU General Public License as
@@ -107,16 +107,11 @@ c2s_stream_started(#{ip := {Addr, _}} = State, _) ->
 start(Host, Opts) ->
     catch ets:new(failed_auth, [named_table, public,
 				{heir, erlang:group_leader(), none}]),
-    ejabberd_commands:register_commands(?MODULE, get_commands_spec()),
+    ejabberd_commands:register_commands(Host, ?MODULE, get_commands_spec()),
     gen_mod:start_child(?MODULE, Host, Opts).
 
 stop(Host) ->
-    case gen_mod:is_loaded_elsewhere(Host, ?MODULE) of
-        false ->
-            ejabberd_commands:unregister_commands(get_commands_spec());
-        true ->
-            ok
-    end,
+    ejabberd_commands:unregister_commands(Host, ?MODULE, get_commands_spec()),
     gen_mod:stop_child(?MODULE, Host).
 
 reload(_Host, _NewOpts, _OldOpts) ->
@@ -139,8 +134,8 @@ handle_call(Request, From, State) ->
     ?WARNING_MSG("Unexpected call from ~p: ~p", [From, Request]),
     {noreply, State}.
 
-handle_cast(_Msg, State) ->
-    ?WARNING_MSG("Unexpected cast = ~p", [_Msg]),
+handle_cast(Msg, State) ->
+    ?WARNING_MSG("Unexpected cast = ~p", [Msg]),
     {noreply, State}.
 
 handle_info(clean, State) ->
@@ -151,8 +146,8 @@ handle_info(clean, State) ->
       ets:fun2ms(fun({_, _, UnbanTS, _}) -> UnbanTS =< Now end)),
     erlang:send_after(?CLEAN_INTERVAL, self(), clean),
     {noreply, State};
-handle_info(_Info, State) ->
-    ?WARNING_MSG("Unexpected info = ~p", [_Info]),
+handle_info(Info, State) ->
+    ?WARNING_MSG("Unexpected info = ~p", [Info]),
     {noreply, State}.
 
 terminate(_Reason, #state{host = Host}) ->

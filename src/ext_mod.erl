@@ -5,7 +5,7 @@
 %%% Created : 19 Feb 2015 by Christophe Romain <christophe.romain@process-one.net>
 %%%
 %%%
-%%% ejabberd, Copyright (C) 2006-2022   ProcessOne
+%%% ejabberd, Copyright (C) 2006-2025   ProcessOne
 %%%
 %%% This program is free software; you can redistribute it and/or
 %%% modify it under the terms of the GNU General Public License as
@@ -33,22 +33,24 @@
          installed_command/0, installed/0, installed/1,
          install/1, uninstall/1, upgrade/0, upgrade/1, add_paths/0,
          add_sources/1, add_sources/2, del_sources/1, modules_dir/0,
+         install_contrib_modules/2,
          config_dir/0, get_commands_spec/0]).
 -export([modules_configs/0, module_ebin_dir/1]).
--export([compile_erlang_file/2, compile_elixir_file/2]).
--export([web_menu_node/3, web_page_node/5]).
+-export([compile_erlang_file/2, compile_elixir_files/2]).
+-export([web_menu_node/3, web_page_node/3, webadmin_node_contrib/3]).
 
 %% gen_server callbacks
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2,
 	 terminate/2, code_change/3]).
 
 -include("ejabberd_commands.hrl").
+-include("ejabberd_http.hrl").
 -include("ejabberd_web_admin.hrl").
 -include("logger.hrl").
 -include("translate.hrl").
 -include_lib("xmpp/include/xmpp.hrl").
 
--define(REPOS, "https://github.com/processone/ejabberd-contrib").
+-define(REPOS, "git@github.com:processone/ejabberd-contrib.git").
 
 -record(state, {}).
 
@@ -66,7 +68,7 @@ init([]) ->
     {ok, #state{}}.
 
 add_paths() ->
-    [code:add_patha(module_ebin_dir(Module))
+    [code:add_pathsz([module_ebin_dir(Module)|module_deps_dirs(Module)])
      || {Module, _} <- installed()].
 
 handle_call(Request, From, State) ->
@@ -76,6 +78,11 @@ handle_call(Request, From, State) ->
 handle_cast(Msg, State) ->
     ?WARNING_MSG("Unexpected cast: ~p", [Msg]),
     {noreply, State}.
+
+handle_info({'ETS-TRANSFER', Table, Process, Module}, State) ->
+    ?DEBUG("ejabberd now controls ETS table ~p from process ~p for module ~p",
+              [Table, Process, Module]),
+    {noreply, State};
 
 handle_info(Info, State) ->
     ?WARNING_MSG("Unexpected info: ~p", [Info]),
@@ -215,10 +222,13 @@ installed_command() ->
     [short_spec(Item) || Item <- installed()].
 
 install(Module) when is_atom(Module) ->
-    install(misc:atom_to_binary(Module));
+    install(misc:atom_to_binary(Module), undefined);
 install(Package) when is_binary(Package) ->
+    install(Package, undefined).
+
+install(Package, Config) when is_binary(Package) ->
     Spec = [S || {Mod, S} <- available(), misc:atom_to_binary(Mod)==Package],
-    case {Spec, installed(Package), is_contrib_allowed()} of
+    case {Spec, installed(Package), is_contrib_allowed(Config)} of
         {_, _, false} ->
             {error, not_allowed};
         {[], _, _} ->
@@ -227,13 +237,14 @@ install(Package) when is_binary(Package) ->
             {error, conflict};
         {[Attrs], _, _} ->
             Module = misc:binary_to_atom(Package),
-            case compile_and_install(Module, Attrs) of
+            case compile_and_install(Module, Attrs, Config) of
                 ok ->
-                    code:add_patha(module_ebin_dir(Module)),
-                    ejabberd_config:reload(),
+                    code:add_pathsz([module_ebin_dir(Module)|module_deps_dirs(Module)]),
+                    ejabberd_config_reload(Config),
                     copy_commit_json(Package, Attrs),
-                    case erlang:function_exported(Module, post_install, 0) of
-                        true -> Module:post_install();
+                    ModuleRuntime = get_runtime_module_name(Module),
+                    case erlang:function_exported(ModuleRuntime, post_install, 0) of
+                        true -> ModuleRuntime:post_install();
                         _ -> ok
                     end;
                 Error ->
@@ -242,21 +253,30 @@ install(Package) when is_binary(Package) ->
             end
     end.
 
+ejabberd_config_reload(Config) when is_list(Config) ->
+    %% Don't reload config when ejabberd is starting
+    %% because it will be reloaded after installing
+    %% all the external modules from install_contrib_modules
+    ok;
+ejabberd_config_reload(undefined) ->
+    ejabberd_config:reload().
+
 uninstall(Module) when is_atom(Module) ->
     uninstall(misc:atom_to_binary(Module));
 uninstall(Package) when is_binary(Package) ->
     case installed(Package) of
         true ->
             Module = misc:binary_to_atom(Package),
-            case erlang:function_exported(Module, pre_uninstall, 0) of
-                true -> Module:pre_uninstall();
+            ModuleRuntime = get_runtime_module_name(Module),
+            case erlang:function_exported(ModuleRuntime, pre_uninstall, 0) of
+                true -> ModuleRuntime:pre_uninstall();
                 _ -> ok
             end,
-            [catch gen_mod:stop_module(Host, Module)
+            [catch gen_mod:stop_module(Host, ModuleRuntime)
              || Host <- ejabberd_option:hosts()],
-            code:purge(Module),
-            code:delete(Module),
-            code:del_path(module_ebin_dir(Module)),
+            code:purge(ModuleRuntime),
+            code:delete(ModuleRuntime),
+            [code:del_path(PathDelete) || PathDelete <- [module_ebin_dir(Module)|module_deps_dirs(Module)]],
             delete_path(module_lib_dir(Module)),
             ejabberd_config:reload();
         false ->
@@ -280,7 +300,7 @@ add_sources(Module, Path) when is_atom(Module), is_list(Path) ->
 add_sources(Package, Path) when is_binary(Package), is_list(Path) ->
     DestDir = sources_dir(),
     RepDir = filename:join(DestDir, module_name(Path)),
-    delete_path(RepDir),
+    delete_path(RepDir, binary_to_list(Package)),
     case filelib:ensure_dir(RepDir) of
         ok ->
             case {string:left(Path, 4), string:right(Path, 2)} of
@@ -343,6 +363,8 @@ geturl(Url) ->
     case httpc:request(get, {Url, [UA]}, User, [{body_format, binary}], ext_mod) of
         {ok, {{_, 200, _}, Headers, Response}} ->
             {ok, Headers, Response};
+        {ok, {{_, 403, Reason}, _Headers, _Response}} ->
+            {error, Reason};
         {ok, {{_, Code, _}, _Headers, Response}} ->
             {error, {Code, Response}};
         {error, Reason} ->
@@ -390,8 +412,9 @@ extract_github_master(Repos, DestDir) ->
     case extract(zip, geturl(Url++"/archive/master.zip"), DestDir) of
         ok ->
             RepDir = filename:join(DestDir, module_name(Repos)),
-            file:rename(RepDir++"-master", RepDir),
-            maybe_write_commit_json(Url, RepDir);
+            RepDirSpec = filename:join(DestDir, module_spec_name(RepDir)),
+            file:rename(RepDir++"-master", RepDirSpec),
+            maybe_write_commit_json(Url, RepDirSpec);
         Error ->
             Error
     end.
@@ -425,6 +448,9 @@ delete_path(Path) ->
         false ->
             file:delete(Path)
     end.
+
+delete_path(Path, Package) ->
+    delete_path(filename:join(filename:dirname(Path), Package)).
 
 modules_dir() ->
     DefaultDir = filename:join(getenv("HOME"), ".ejabberd-modules"),
@@ -464,6 +490,14 @@ module_src_dir(Package) ->
 module_name(Id) ->
     filename:basename(filename:rootname(Id)).
 
+module_spec_name(Path) ->
+    case filelib:wildcard(filename:join(Path++"-master", "*.spec")) of
+        "" ->
+            module_name(Path);
+        ModuleName ->
+            filename:basename(ModuleName, ".spec")
+    end.
+
 module(Id) ->
     misc:binary_to_atom(iolist_to_binary(module_name(Id))).
 
@@ -483,7 +517,13 @@ modules_spec(Dir, Path) ->
 short_spec({Module, Attrs}) when is_atom(Module), is_list(Attrs) ->
     {Module, proplists:get_value(summary, Attrs, "")}.
 
-is_contrib_allowed() ->
+is_contrib_allowed(Config) when is_list(Config) ->
+    case lists:keyfind(allow_contrib_modules, 1, Config) of
+        false -> true;
+        {_, false} -> false;
+        {_, true} -> true
+    end;
+is_contrib_allowed(undefined) ->
     ejabberd_option:allow_contrib_modules().
 
 %% -- build functions
@@ -526,15 +566,15 @@ check_sources(Module) ->
         _ -> {error, Result}
     end.
 
-compile_and_install(Module, Spec) ->
+compile_and_install(Module, Spec, Config) ->
     SrcDir = module_src_dir(Module),
     LibDir = module_lib_dir(Module),
     case filelib:is_dir(SrcDir) of
         true ->
             case compile_deps(SrcDir) of
                 ok ->
-                    case compile(SrcDir) of
-                        ok -> install(Module, Spec, SrcDir, LibDir);
+                    case compile(SrcDir, filename:join(SrcDir, "deps")) of
+                        ok -> install(Module, Spec, SrcDir, LibDir, Config);
                         Error -> Error
                     end;
                 Error ->
@@ -543,33 +583,47 @@ compile_and_install(Module, Spec) ->
         false ->
             Path = proplists:get_value(url, Spec, ""),
             case add_sources(Module, Path) of
-                ok -> compile_and_install(Module, Spec);
+                ok -> compile_and_install(Module, Spec, Config);
                 Error -> Error
             end
     end.
 
 compile_deps(LibDir) ->
-    Deps = filename:join(LibDir, "deps"),
-    case filelib:is_dir(Deps) of
+    DepsDir = filename:join(LibDir, "deps"),
+    case filelib:is_dir(DepsDir) of
         true -> ok;  % assume deps are included
         false -> fetch_rebar_deps(LibDir)
     end,
-    Rs = [compile(Dep) || Dep <- filelib:wildcard(filename:join(Deps, "*"))],
+    Rs = [compile(Dep, DepsDir) || Dep <- filelib:wildcard(filename:join(DepsDir, "*"))],
     compile_result(Rs).
 
-compile(LibDir) ->
+compile(LibDir, DepsDir) ->
     Bin = filename:join(LibDir, "ebin"),
-    Inc = filename:join(LibDir, "include"),
     Lib = filename:join(LibDir, "lib"),
     Src = filename:join(LibDir, "src"),
-    Options = [{outdir, Bin}, {i, Inc} | compile_options()],
+    Includes = [ {i, Inc} || Inc <- filelib:wildcard(DepsDir++"/**/include") ],
+    Options = [ {outdir, Bin},
+                {i, LibDir++"/.."},
+                {i, filename:join(LibDir, "include")}
+              | Includes ++ compile_options()],
+    ?DEBUG("compile options: ~p", [Options]),
     filelib:ensure_dir(filename:join(Bin, ".")),
-    [copy(App, Bin) || App <- filelib:wildcard(Src++"/*.app")],
+    [copy(App, filename:join(Bin, filename:basename(App, ".src"))) || App <- filelib:wildcard(Src++"/*.app*")],
+    compile_c_files(LibDir),
+    ErlFiles = filelib:wildcard(Src++"/**/*.erl"),
+    ?DEBUG("erl files to compile: ~p", [ErlFiles]),
     Er = [compile_erlang_file(Bin, File, Options)
-          || File <- filelib:wildcard(Src++"/*.erl")],
-    Ex = [compile_elixir_file(Bin, File)
-          || File <- filelib:wildcard(Lib ++ "/*.ex")],
-    compile_result(Er++Ex).
+          || File <- ErlFiles],
+    Ex = compile_elixir_files(Bin, filelib:wildcard(Lib ++ "/**/*.ex")),
+    compile_result(lists:flatten([Er, Ex])).
+
+compile_c_files(LibDir) ->
+    case file:read_file_info(filename:join(LibDir, "c_src/Makefile")) of
+        {ok, _} ->
+            os:cmd("cd "++LibDir++"; make -C c_src");
+        {error, _} ->
+            ok
+    end.
 
 compile_result(Results) ->
     case lists:dropwhile(
@@ -625,31 +679,49 @@ compile_erlang_file(Dest, File, ErlOptions) ->
     end.
 
 -ifdef(ELIXIR_ENABLED).
-compile_elixir_file(Dest, File) when is_list(Dest) and is_list(File) ->
-  compile_elixir_file(list_to_binary(Dest), list_to_binary(File));
+compile_elixir_files(_, []) ->
+    ok;
+compile_elixir_files(Dest, [File | _] = Files) when is_list(Dest) and is_list(File) ->
+  BinFiles = [list_to_binary(F) || F <- Files],
+  compile_elixir_files(list_to_binary(Dest), BinFiles);
 
-compile_elixir_file(Dest, File) ->
-  try 'Elixir.Kernel.ParallelCompiler':files_to_path([File], Dest, []) of
-    [Module] -> {ok, Module}
+compile_elixir_files(Dest, Files) ->
+  try 'Elixir.Kernel.ParallelCompiler':compile_to_path(Files, Dest, [{return_diagnostics, true}]) of
+      {ok, Modules, []} when is_list(Modules) ->
+          {ok, Modules};
+      {ok, Modules, Warnings} when is_list(Modules) ->
+          ?WARNING_MSG("Warnings compiling module: ~n~p", [Warnings]),
+          {ok, Modules}
   catch
-    _ -> {error, {compilation_failed, File}}
+    A:B ->
+          ?ERROR_MSG("Problem ~p compiling Elixir files: ~p~nFiles: ~p", [A, B, Files]),
+          {error, {compilation_failed, Files}}
   end.
 -else.
-compile_elixir_file(_, File) ->
-    {error, {compilation_failed, File}}.
+compile_elixir_files(_, []) ->
+    ok;
+compile_elixir_files(_, Files) ->
+    ErrorString = "Attempted to compile Elixir files, but Elixir support is "
+        "not available in ejabberd. Try compiling ejabberd using "
+        "'./configure --enable-elixir' or './configure --with-rebar=mix'",
+    ?ERROR_MSG(ErrorString, []),
+    io:format("Error: " ++ ErrorString ++ "~n", []),
+    {error, {elixir_not_available, Files}}.
 -endif.
 
-install(Module, Spec, SrcDir, LibDir) ->
+install(Module, Spec, SrcDir, LibDir, Config) ->
     {ok, CurDir} = file:get_cwd(),
     file:set_cwd(SrcDir),
     Files1 = [{File, copy(File, filename:join(LibDir, File))}
                   || File <- filelib:wildcard("{ebin,priv,conf,include}/**")],
     Files2 = [{File, copy(File, filename:join(LibDir, filename:join(lists:nthtail(2,filename:split(File)))))}
-                  || File <- filelib:wildcard("deps/*/{ebin,priv}/**")],
+                  || File <- filelib:wildcard("deps/*/ebin/**")],
+    Files3 = [{File, copy(File, filename:join(LibDir, File))}
+                  || File <- filelib:wildcard("deps/*/priv/**")],
     Errors = lists:dropwhile(fun({_, ok}) -> true;
                                 (_) -> false
-            end, Files1++Files2),
-    inform_module_configuration(Module, LibDir, Files1),
+            end, Files1++Files2++Files3),
+    inform_module_configuration(Module, LibDir, Files1, Config),
     Result = case Errors of
         [{F, {error, E}}|_] ->
             {error, {F, E}};
@@ -661,23 +733,36 @@ install(Module, Spec, SrcDir, LibDir) ->
     file:set_cwd(CurDir),
     Result.
 
-inform_module_configuration(Module, LibDir, Files1) ->
+inform_module_configuration(Module, LibDir, Files1, Config) ->
     Res = lists:filter(fun({[$c, $o, $n, $f |_], ok}) -> true;
                           (_) -> false
             end, Files1),
-    case Res of
-        [{ConfigPath, ok}] ->
+    AlreadyConfigured = lists:keymember(Module, 1, get_modules(Config)),
+    case {Res, AlreadyConfigured} of
+        {[{ConfigPath, ok}], false} ->
             FullConfigPath = filename:join(LibDir, ConfigPath),
             io:format("Module ~p has been installed and started.~n"
                       "It's configured in the file:~n  ~s~n"
                       "Configure the module in that file, or remove it~n"
                       "and configure in your main ejabberd.yml~n",
                       [Module, FullConfigPath]);
-        [] ->
+        {[{ConfigPath, ok}], true} ->
+            FullConfigPath = filename:join(LibDir, ConfigPath),
+            file:rename(FullConfigPath, FullConfigPath++".example"),
+            io:format("Module ~p has been installed and started.~n"
+                      "The ~p configuration in your ejabberd.yml is used.~n",
+                      [Module, Module]);
+        {[], _} ->
             io:format("Module ~p has been installed.~n"
                       "Now you can configure it in your ejabberd.yml~n",
                       [Module])
     end.
+
+get_modules(Config) when is_list(Config) ->
+    {modules, Modules} = lists:keyfind(modules, 1, Config),
+    Modules;
+get_modules(undefined) ->
+    ejabberd_config:get_option(modules).
 
 %% -- minimalist rebar spec parser, only support git
 
@@ -690,8 +775,10 @@ fetch_rebar_deps(SrcDir) ->
             {ok, CurDir} = file:get_cwd(),
             file:set_cwd(SrcDir),
             filelib:ensure_dir(filename:join("deps", ".")),
-            lists:foreach(fun({_App, Cmd}) ->
-                        os:cmd("cd deps; "++Cmd++"; cd ..")
+            lists:foreach(fun({App, Cmd}) ->
+                        io:format("Fetching dependency ~s: ", [App]),
+                        Result = os:cmd("cd deps; "++Cmd++"; cd .."),
+                        io:format("~s", [Result])
                 end, Deps),
             file:set_cwd(CurDir)
     end.
@@ -705,6 +792,19 @@ rebar_deps(Script) ->
         _ ->
             []
     end.
+
+rebar_dep({App, Version, Git}) when Version /= ".*" ->
+    AppS = atom_to_list(App),
+    Help = os:cmd("mix hex.package"),
+    case string:find(Help, "mix hex.package fetch") /= nomatch of
+        true ->
+            {App, "mix hex.package fetch "++AppS++" "++Version++" --unpack --output "++AppS};
+        false ->
+            io:format("I'll download ~p using git because I can't use Mix "
+                      "to fetch from hex.pm:~n~s", [AppS, Help]),
+            rebar_dep({App, ".*", Git})
+    end;
+
 rebar_dep({App, _, {git, Url}}) ->
     {App, "git clone "++Url++" "++filename:basename(App)};
 rebar_dep({App, _, {git, Url, {branch, Ref}}}) ->
@@ -719,6 +819,14 @@ rebar_dep({App, _, {git, Url, Ref}}) ->
     {App, "git clone -n "++Url++" "++filename:basename(App)++
      "; (cd "++filename:basename(App)++
      "; git checkout -q "++Ref++")"}.
+
+module_deps_dirs(Module) ->
+    SrcDir = module_src_dir(Module),
+    LibDir = module_lib_dir(Module),
+    DepsDir = filename:join(LibDir, "deps"),
+    Deps = rebar_deps(filename:join(SrcDir, "rebar.config"))
+      ++ rebar_deps(filename:join(SrcDir, "rebar.config.script")),
+    [filename:join(DepsDir, App) || {App, _Cmd} <- Deps].
 
 %% -- YAML spec parser
 
@@ -747,13 +855,17 @@ maybe_write_commit_json(Url, RepDir) ->
 write_commit_json(Url, RepDir) ->
     Url2 = string_replace(Url, "https://github.com", "https://api.github.com/repos"),
     BranchUrl = lists:flatten(Url2 ++ "/branches/master"),
-    {ok, _Headers, Body} = geturl(BranchUrl),
-    {ok, F} = file:open(filename:join(RepDir, "COMMIT.json"), [raw, write]),
-    file:write(F, Body),
-    file:close(F).
+    case geturl(BranchUrl) of
+        {ok, _Headers, Body} ->
+            {ok, F} = file:open(filename:join(RepDir, "COMMIT.json"), [raw, write]),
+            file:write(F, Body),
+            file:close(F);
+        {error, Reason} ->
+            Reason
+    end.
 
 find_commit_json(Attrs) ->
-    {_, FromPath} = lists:keyfind(path, 1, Attrs),
+    FromPath = get_module_path(Attrs),
     case {find_commit_json_path(FromPath),
           find_commit_json_path(filename:join(FromPath, ".."))}
     of
@@ -805,29 +917,30 @@ get_commit_details2(Path) ->
         {ok, Body} ->
             parse_details(Body);
         _ ->
-            #{sha => <<"1234567890">>,
+            #{sha => unknown_sha,
               date => <<>>,
               message => <<>>,
               html => <<>>,
+              author_name => <<>>,
               commit_html_url => <<>>}
     end.
 
 parse_details(Body) ->
-    {Contents} = jiffy:decode(Body),
+    Contents = misc:json_decode(Body),
 
-    {_, {Commit}} = lists:keyfind(<<"commit">>, 1, Contents),
-    {_, Sha} = lists:keyfind(<<"sha">>, 1, Commit),
-    {_, CommitHtmlUrl} = lists:keyfind(<<"html_url">>, 1, Commit),
+    {ok, Commit} = maps:find(<<"commit">>, Contents),
+    {ok, Sha} = maps:find(<<"sha">>, Commit),
+    {ok, CommitHtmlUrl} = maps:find(<<"html_url">>, Commit),
 
-    {_, {Commit2}} = lists:keyfind(<<"commit">>, 1, Commit),
-    {_, Message} = lists:keyfind(<<"message">>, 1, Commit2),
-    {_, {Author}} = lists:keyfind(<<"author">>, 1, Commit2),
-    {_, AuthorName} = lists:keyfind(<<"name">>, 1, Author),
-    {_, {Committer}} = lists:keyfind(<<"committer">>, 1, Commit2),
-    {_, Date} = lists:keyfind(<<"date">>, 1, Committer),
+    {ok, Commit2} = maps:find(<<"commit">>, Commit),
+    {ok, Message} = maps:find(<<"message">>, Commit2),
+    {ok, Author} = maps:find(<<"author">>, Commit2),
+    {ok, AuthorName} = maps:find(<<"name">>, Author),
+    {ok, Committer} = maps:find(<<"committer">>, Commit2),
+    {ok, Date} = maps:find(<<"date">>, Committer),
 
-    {_, {Links}} = lists:keyfind(<<"_links">>, 1, Contents),
-    {_, Html} = lists:keyfind(<<"html">>, 1, Links),
+    {ok, Links} = maps:find(<<"_links">>, Contents),
+    {ok, Html} = maps:find(<<"html">>, Links),
 
     #{sha => Sha,
       date => Date,
@@ -853,26 +966,159 @@ parse_details(Body) ->
            )
        ).
 
-web_menu_node(Acc, _Node, Lang) ->
-    Acc ++ [{<<"contrib">>, translate:translate(Lang, ?T("Contrib Modules"))}].
+%% @format-begin
 
-web_page_node(_, Node, [<<"contrib">>], Query, Lang) ->
-    QueryRes = list_modules_parse_query(Query),
-    Title = ?H1GL(translate:translate(Lang, ?T("Contrib Modules")),
-                  <<"../../developer/extending-ejabberd/modules/#ejabberd-contrib">>,
-                  <<"ejabberd-contrib">>),
-    Contents = get_content(Node, Query, Lang),
-    Result = case QueryRes of
-                 ok -> [?XREST(?T("Submitted"))];
-                 nothing -> []
-             end,
-    Res = Title ++ Result ++ Contents,
-    {stop, Res};
-web_page_node(Acc, _, _, _, _) ->
+web_menu_node(Acc, _Node, _Lang) ->
+    Acc
+    ++ [{<<"contrib">>, <<"Contrib Modules (Detailed)">>},
+        {<<"contrib-api">>, <<"Contrib Modules (API)">>}].
+
+web_page_node(_,
+              Node,
+              #request{path = [<<"contrib">>],
+                       q = Query,
+                       lang = Lang} =
+                  R) ->
+    Title =
+        ?H1GL(<<"Contrib Modules (Detailed)">>,
+              <<"../../developer/extending-ejabberd/modules/#ejabberd-contrib">>,
+              <<"ejabberd-contrib">>),
+    Res = [ejabberd_cluster:call(Node,
+                                 ejabberd_web_admin,
+                                 make_command,
+                                 [webadmin_node_contrib,
+                                  R,
+                                  [{<<"node">>, Node}, {<<"query">>, Query}, {<<"lang">>, Lang}],
+                                  []])],
+    {stop, Title ++ Res};
+web_page_node(_, Node, #request{path = [<<"contrib-api">> | RPath]} = R) ->
+    Title =
+        ?H1GL(<<"Contrib Modules (API)">>,
+              <<"../../developer/extending-ejabberd/modules/#ejabberd-contrib">>,
+              <<"ejabberd-contrib">>),
+    _TableInstalled = make_table_installed(Node, R, RPath),
+    _TableAvailable = make_table_available(Node, R, RPath),
+    TableInstalled = make_table_installed(Node, R, RPath),
+    TableAvailable = make_table_available(Node, R, RPath),
+    Res = [?X(<<"hr">>),
+           ?XAC(<<"h2">>, [{<<"id">>, <<"specs">>}], <<"Specs">>),
+           ?XE(<<"blockquote">>,
+               [ejabberd_cluster:call(Node,
+                                      ejabberd_web_admin,
+                                      make_command,
+                                      [modules_update_specs, R])]),
+           ?X(<<"hr">>),
+           ?XAC(<<"h2">>, [{<<"id">>, <<"installed">>}], <<"Installed">>),
+           ?XE(<<"blockquote">>,
+               [ejabberd_cluster:call(Node,
+                                      ejabberd_web_admin,
+                                      make_command,
+                                      [modules_installed, R, [], [{only, presentation}]]),
+                ejabberd_cluster:call(Node,
+                                      ejabberd_web_admin,
+                                      make_command,
+                                      [module_uninstall, R, [], [{only, presentation}]]),
+                ejabberd_cluster:call(Node,
+                                      ejabberd_web_admin,
+                                      make_command,
+                                      [module_upgrade, R, [], [{only, presentation}]]),
+                TableInstalled]),
+           ?X(<<"hr">>),
+           ?XAC(<<"h2">>, [{<<"id">>, <<"available">>}], <<"Available">>),
+           ?XE(<<"blockquote">>,
+               [ejabberd_cluster:call(Node,
+                                      ejabberd_web_admin,
+                                      make_command,
+                                      [modules_available, R, [], [{only, presentation}]]),
+                ejabberd_cluster:call(Node,
+                                      ejabberd_web_admin,
+                                      make_command,
+                                      [module_install, R, [], [{only, presentation}]]),
+                TableAvailable,
+                ejabberd_cluster:call(Node, ejabberd_web_admin, make_command, [module_check, R])])],
+    {stop, Title ++ Res};
+web_page_node(Acc, _, _) ->
     Acc.
 
+make_table_installed(Node, R, RPath) ->
+    Columns = [<<"Name">>, <<"Summary">>, <<"">>, <<"">>],
+    ModulesInstalled =
+        ejabberd_cluster:call(Node,
+                              ejabberd_web_admin,
+                              make_command_raw_value,
+                              [modules_installed, R, []]),
+    Rows =
+        lists:map(fun({Name, Summary}) ->
+                     NameBin = misc:atom_to_binary(Name),
+                     Upgrade =
+                         ejabberd_cluster:call(Node,
+                                               ejabberd_web_admin,
+                                               make_command,
+                                               [module_upgrade,
+                                                R,
+                                                [{<<"module">>, NameBin}],
+                                                [{only, button}, {input_name_append, [NameBin]}]]),
+                     Uninstall =
+                         ejabberd_cluster:call(Node,
+                                               ejabberd_web_admin,
+                                               make_command,
+                                               [module_uninstall,
+                                                R,
+                                                [{<<"module">>, NameBin}],
+                                                [{only, button},
+                                                 {style, danger},
+                                                 {input_name_append, [NameBin]}]]),
+                     {?C(NameBin), ?C(list_to_binary(Summary)), Upgrade, Uninstall}
+                  end,
+                  ModulesInstalled),
+    ejabberd_web_admin:make_table(200, RPath, Columns, Rows).
+
+make_table_available(Node, R, RPath) ->
+    Columns = [<<"Name">>, <<"Summary">>, <<"">>],
+    ModulesAll =
+        ejabberd_cluster:call(Node,
+                              ejabberd_web_admin,
+                              make_command_raw_value,
+                              [modules_available, R, []]),
+    ModulesInstalled =
+        ejabberd_cluster:call(Node,
+                              ejabberd_web_admin,
+                              make_command_raw_value,
+                              [modules_installed, R, []]),
+    ModulesNotInstalled =
+        lists:filter(fun({Mod, _}) -> not lists:keymember(Mod, 1, ModulesInstalled) end,
+                     ModulesAll),
+    Rows =
+        lists:map(fun({Name, Summary}) ->
+                     NameBin = misc:atom_to_binary(Name),
+                     Install =
+                         ejabberd_cluster:call(Node,
+                                               ejabberd_web_admin,
+                                               make_command,
+                                               [module_install,
+                                                R,
+                                                [{<<"module">>, NameBin}],
+                                                [{only, button}, {input_name_append, [NameBin]}]]),
+                     {?C(NameBin), ?C(list_to_binary(Summary)), Install}
+                  end,
+                  ModulesNotInstalled),
+    ejabberd_web_admin:make_table(200, RPath, Columns, Rows).
+
+webadmin_node_contrib(Node, Query, Lang) ->
+    QueryRes = list_modules_parse_query(Query),
+    Contents = get_content(Node, Query, Lang),
+    Result =
+        case QueryRes of
+            ok ->
+                [?XREST(?T("Submitted"))];
+            nothing ->
+                []
+        end,
+    Result ++ Contents.
+%% @format-end
+
 get_module_home(Module, Attrs) ->
-    case element(2, lists:keyfind(home, 1, Attrs)) of
+    case get_module_information(home, Attrs) of
         "https://github.com/processone/ejabberd-contrib/tree/master/" = P1 ->
             P1 ++ atom_to_list(Module);
         Other ->
@@ -880,19 +1126,30 @@ get_module_home(Module, Attrs) ->
     end.
 
 get_module_summary(Attrs) ->
-    element(2, lists:keyfind(summary, 1, Attrs)).
+    get_module_information(summary, Attrs).
 
 get_module_author(Attrs) ->
-    element(2, lists:keyfind(author, 1, Attrs)).
+    get_module_information(author, Attrs).
+
+get_module_path(Attrs) ->
+    get_module_information(path, Attrs).
+
+get_module_information(Attribute, Attrs) ->
+    case lists:keyfind(Attribute, 1, Attrs) of
+        false -> "";
+        {_, Value} -> Value
+    end.
 
 get_installed_module_el({ModAtom, Attrs}, Lang) ->
     Mod = misc:atom_to_binary(ModAtom),
     Home = list_to_binary(get_module_home(ModAtom, Attrs)),
     Summary = list_to_binary(get_module_summary(Attrs)),
     Author = list_to_binary(get_module_author(Attrs)),
-    {_, FromPath} = lists:keyfind(path, 1, Attrs),
-    {ok, FromFile} = find_commit_json_path(FromPath),
-
+    FromPath = get_module_path(Attrs),
+    FromFile = case find_commit_json_path(FromPath) of
+                   {ok, FF} -> FF;
+                   {error, _} -> "dummypath"
+               end,
     #{sha := CommitSha,
       date := CommitDate,
       message := CommitMessage,
@@ -925,28 +1182,83 @@ get_installed_module_el({ModAtom, Attrs}, Lang) ->
     Started =
         case gen_mod:is_loaded(hd(ejabberd_option:hosts()), ModAtom) of
             false ->
-                [?C(<<" - ">>)];
+                [?C(<<" ">>)];
             true ->
                 []
         end,
     TitleEl = make_title_el(CommitDate, CommitMessage, CommitAuthorName),
-    Status = case lists:member({mod_status, 0}, ModAtom:module_info(exports)) of
-                 true ->
-                     [?C(<<" ">>),
-                      ?C(ModAtom:mod_status())];
-                 false -> []
-             end,
+    Status = get_module_status_el(ModAtom),
     HomeTitleEl = make_home_title_el(Summary, Author),
     ?XE(<<"tr">>,
         [?XE(<<"td">>, [?AXC(Home, [HomeTitleEl], Mod)]),
          ?XE(<<"td">>,
              [?INPUTTD(<<"checkbox">>, <<"selected_uninstall">>, Mod),
               ?C(<<" ">>),
-              ?AXC(CommitHtmlUrl, [TitleEl], binary:part(CommitSha, {0, 8})),
-              ?C(<<" ">>)]
+              get_commit_link(CommitHtmlUrl, TitleEl, CommitSha),
+              ?C(<<" - ">>)]
              ++ Started
              ++ Status)
         | UpgradeEls]).
+
+get_module_status_el(ModAtom) ->
+    case {get_module_status(ModAtom),
+          get_module_status(elixir_module_name(ModAtom))} of
+        {Str, unknown} when is_list(Str) ->
+            [?C(<<" ">>), ?C(Str)];
+        {unknown, Str} when is_list(Str) ->
+            [?C(<<" ">>), ?C(Str)];
+        {unknown, unknown} ->
+            []
+    end.
+
+get_module_status(Module) ->
+    try Module:mod_status() of
+        Str when is_list(Str) ->
+            Str
+    catch
+        _:_ ->
+            unknown
+    end.
+
+%% When a module named mod_whatever in ejabberd-modules
+%% is written in Elixir, its runtime name is 'Elixir.ModWhatever'
+get_runtime_module_name(Module) ->
+    case is_elixir_module(Module) of
+        true -> elixir_module_name(Module);
+        false -> Module
+    end.
+
+is_elixir_module(Module) ->
+    LibDir = module_src_dir(Module),
+    Lib = filename:join(LibDir, "lib"),
+    Src = filename:join(LibDir, "src"),
+    case {filelib:wildcard(Lib++"/*.{ex}"),
+          filelib:wildcard(Src++"/*.{erl}")} of
+        {[_ | _], []} ->
+            true;
+        {[], _} ->
+            false
+    end.
+
+%% Converts mod_some_thing to Elixir.ModSomeThing
+elixir_module_name(ModAtom) ->
+    list_to_atom("Elixir." ++ elixir_module_name("_" ++ atom_to_list(ModAtom), [])).
+
+elixir_module_name([], Res) ->
+    lists:reverse(Res);
+elixir_module_name([$_, Char | Remaining], Res) ->
+    [Upper] = uppercase([Char]),
+    elixir_module_name(Remaining, [Upper | Res]);
+elixir_module_name([Char | Remaining], Res) ->
+    elixir_module_name(Remaining, [Char | Res]).
+
+-ifdef(HAVE_URI_STRING).
+uppercase(String) ->
+    string:uppercase(String). % OTP 20 or higher
+-else.
+uppercase(String) ->
+    string:to_upper(String). % OTP older than 20
+-endif.
 
 get_available_module_el({ModAtom, Attrs}) ->
     Installed = installed(),
@@ -1006,11 +1318,15 @@ make_home_title_el(Summary, Author) ->
     LinkTitle = <<Summary/binary, "\n", Author/binary>>,
     {<<"title">>, LinkTitle}.
 
+get_commit_link(_CommitHtmlUrl, _TitleErl, unknown_sha) ->
+    ?C(<<"Please Update Specs">>);
+get_commit_link(CommitHtmlUrl, TitleEl, CommitSha) ->
+    ?AXC(CommitHtmlUrl, [TitleEl], binary:part(CommitSha, {0, 8})).
+
 get_content(Node, Query, Lang) ->
-    Instruct = translate:translate(Lang, ?T("Type a command in a textbox and click Execute.")),
     {{_CommandCtl}, _Res} =
         case catch parse_and_execute(Query, Node) of
-            {'EXIT', _} -> {{""}, Instruct};
+            {'EXIT', _} -> {{""}, <<"">>};
             Result_tuple -> Result_tuple
         end,
 
@@ -1034,7 +1350,7 @@ get_content(Node, Query, Lang) ->
                                       ?XE(<<"tr">>,
                                           [?XE(<<"td">>, [?AC(Html, Dirname)]),
                                            ?XE(<<"td">>,
-                                               [?AXC(CommitHtmlUrl, [TitleEl], binary:part(CommitSha, {0, 8}))]
+                                               [get_commit_link(CommitHtmlUrl, TitleEl, CommitSha)]
                                               ),
                                            ?XE(<<"td">>, [?C(CommitMessage)])
                                           ])
@@ -1149,3 +1465,14 @@ list_modules_parse_uninstall(Query) ->
       end,
       installed()),
     ok.
+
+install_contrib_modules(Modules, Config) ->
+    lists:filter(fun(Module) ->
+                         case install(misc:atom_to_binary(Module), Config) of
+                             {error, conflict} ->
+                                 false;
+                             ok ->
+                                 true
+                         end
+                 end,
+                 Modules).

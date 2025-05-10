@@ -5,7 +5,7 @@
 %%% Created : 24 Aug 2008 by Stephan Maka <stephan@spaceboyz.net>
 %%%
 %%%
-%%% ejabberd, Copyright (C) 2002-2022   ProcessOne
+%%% ejabberd, Copyright (C) 2002-2025   ProcessOne
 %%%
 %%% This program is free software; you can redistribute it and/or
 %%% modify it under the terms of the GNU General Public License as
@@ -27,7 +27,7 @@
 
 -behaviour(gen_mod).
 
--protocol({xep, 191, '1.2'}).
+-protocol({xep, 191, '1.2', '2.1.7', "complete", ""}).
 
 -export([start/2, stop/1, reload/3, process_iq/1, depends/2,
 	 disco_features/5, mod_options/1, mod_doc/0]).
@@ -37,14 +37,12 @@
 -include("mod_privacy.hrl").
 -include("translate.hrl").
 
-start(Host, _Opts) ->
-    ejabberd_hooks:add(disco_local_features, Host, ?MODULE, disco_features, 50),
-    gen_iq_handler:add_iq_handler(ejabberd_sm, Host,
-				  ?NS_BLOCKING, ?MODULE, process_iq).
+start(_Host, _Opts) ->
+    {ok, [{hook, disco_local_features, disco_features, 50},
+          {iq_handler, ejabberd_sm, ?NS_BLOCKING, process_iq}]}.
 
-stop(Host) ->
-    ejabberd_hooks:delete(disco_local_features, Host, ?MODULE, disco_features, 50),
-    gen_iq_handler:remove_iq_handler(ejabberd_sm, Host, ?NS_BLOCKING).
+stop(_Host) ->
+    ok.
 
 reload(_Host, _NewOpts, _OldOpts) ->
     ok.
@@ -271,5 +269,5 @@ mod_doc() ->
           [?T("The module implements "
               "https://xmpp.org/extensions/xep-0191.html"
               "[XEP-0191: Blocking Command]."), "",
-           ?T("This module depends on 'mod_privacy' where "
+           ?T("This module depends on _`mod_privacy`_ where "
               "all the configuration is performed.")]}.

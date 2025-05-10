@@ -1,11 +1,11 @@
 %%%----------------------------------------------------------------------
 %%% File    : mod_bosh_sql.erl
 %%% Author  : Evgeny Khramtsov <ekhramtsov@process-one.net>
-%%% Purpose : 
+%%% Purpose :
 %%% Created : 28 Mar 2017 by Evgeny Khramtsov <ekhramtsov@process-one.net>
 %%%
 %%%
-%%% ejabberd, Copyright (C) 2017-2022   ProcessOne
+%%% ejabberd, Copyright (C) 2017-2025   ProcessOne
 %%%
 %%% This program is free software; you can redistribute it and/or
 %%% modify it under the terms of the GNU General Public License as
@@ -29,6 +29,7 @@
 
 %% API
 -export([init/0, open_session/2, close_session/1, find_session/1]).
+-export([sql_schemas/0]).
 
 -include("logger.hrl").
 -include("ejabberd_sql_pt.hrl").
@@ -37,6 +38,8 @@
 %%% API
 %%%===================================================================
 init() ->
+    ejabberd_sql_schema:update_schema(
+      ejabberd_config:get_myname(), ?MODULE, sql_schemas()),
     Node = erlang:atom_to_binary(node(), latin1),
     ?DEBUG("Cleaning SQL 'bosh' table...", []),
     case ejabberd_sql:sql_query(
@@ -47,6 +50,20 @@ init() ->
 	    ?ERROR_MSG("Failed to clean 'route' table: ~p", [Err]),
 	    Err
     end.
+
+sql_schemas() ->
+    [#sql_schema{
+        version = 1,
+        tables =
+            [#sql_table{
+                name = <<"bosh">>,
+                columns =
+                    [#sql_column{name = <<"sid">>, type = text},
+                     #sql_column{name = <<"node">>, type = text},
+                     #sql_column{name = <<"pid">>, type = text}],
+                indices = [#sql_index{
+                              columns = [<<"sid">>],
+                              unique = true}]}]}].
 
 open_session(SID, Pid) ->
     PidS = misc:encode_pid(Pid),

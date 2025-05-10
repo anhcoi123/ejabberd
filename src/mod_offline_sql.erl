@@ -4,7 +4,7 @@
 %%% Created : 15 Apr 2016 by Evgeny Khramtsov <ekhramtsov@process-one.net>
 %%%
 %%%
-%%% ejabberd, Copyright (C) 2002-2022   ProcessOne
+%%% ejabberd, Copyright (C) 2002-2025   ProcessOne
 %%%
 %%% This program is free software; you can redistribute it and/or
 %%% modify it under the terms of the GNU General Public License as
@@ -31,6 +31,7 @@
 	 remove_old_messages/2, remove_user/2, read_message_headers/2,
 	 read_message/3, remove_message/3, read_all_messages/2,
 	 remove_all_messages/2, count_messages/2, import/1, export/1, remove_old_messages_batch/3]).
+-export([sql_schemas/0]).
 
 -include_lib("xmpp/include/xmpp.hrl").
 -include("mod_offline.hrl").
@@ -40,8 +41,27 @@
 %%%===================================================================
 %%% API
 %%%===================================================================
-init(_Host, _Opts) ->
+init(Host, _Opts) ->
+    ejabberd_sql_schema:update_schema(Host, ?MODULE, sql_schemas()),
     ok.
+
+sql_schemas() ->
+    [#sql_schema{
+        version = 1,
+        tables =
+            [#sql_table{
+                name = <<"spool">>,
+                columns =
+                    [#sql_column{name = <<"username">>, type = text},
+                     #sql_column{name = <<"server_host">>, type = text},
+                     #sql_column{name = <<"xml">>, type = {text, big}},
+                     #sql_column{name = <<"seq">>, type = bigserial},
+                     #sql_column{name = <<"created_at">>, type = timestamp,
+                                 default = true}],
+                indices = [#sql_index{
+                              columns = [<<"server_host">>, <<"username">>]},
+                           #sql_index{
+                              columns = [<<"created_at">>]}]}]}].
 
 store_message(#offline_msg{us = {LUser, LServer}} = M) ->
     From = M#offline_msg.from,
@@ -107,8 +127,8 @@ remove_old_messages(Days, LServer) ->
         of
 	{updated, N} ->
 	    ?INFO_MSG("~p message(s) deleted from offline spool", [N]);
-	_Error ->
-	    ?ERROR_MSG("Cannot delete message in offline spool: ~p", [_Error])
+	Error ->
+	    ?ERROR_MSG("Cannot delete message in offline spool: ~p", [Error])
     end,
     {atomic, ok}.
 

@@ -27,7 +27,7 @@
 
 -author('badlop@process-one.net').
 
--protocol({xep, 156, '1.4.0'}).
+-protocol({xep, 156, '1.4.0', '22.05', "complete", ""}).
 
 -behaviour(gen_mod).
 
@@ -51,12 +51,14 @@
 %%%----------------------------------------------------------------------
 
 start(_Host, _Opts) ->
+    report_hostmeta_listener(),
     ok.
 
 stop(_Host) ->
     ok.
 
 reload(_Host, _NewOpts, _OldOpts) ->
+    report_hostmeta_listener(),
     ok.
 
 depends(_Host, _Opts) ->
@@ -66,7 +68,7 @@ depends(_Host, _Opts) ->
 %%% HTTP handlers
 %%%----------------------------------------------------------------------
 
-process([], #request{method = 'GET', tp = https, host = Host, path = Path}) ->
+process([], #request{method = 'GET', host = Host, path = Path}) ->
     case lists:last(Path) of
         <<"host-meta">> ->
             file_xml(Host);
@@ -123,7 +125,7 @@ file_json(Host) ->
     {200, [html,
            {<<"Content-Type">>, <<"application/json">>},
            {<<"Access-Control-Allow-Origin">>, <<"*">>}],
-     [jiffy:encode(#{links => BoshList ++ WsList})]}.
+     [misc:json_encode(#{links => BoshList ++ WsList})]}.
 
 get_url(M, bosh, Tls, Host) ->
     get_url(M, Tls, Host, bosh_service_url, mod_bosh);
@@ -166,13 +168,30 @@ find_handler_port_path(Tls, Module) ->
       fun({{Port, _, _},
            ejabberd_http,
            #{tls := ThisTls, request_handlers := Handlers}})
-            when (Tls == any) or (Tls == ThisTls) ->
+            when is_integer(Port) and ((Tls == any) or (Tls == ThisTls)) ->
               case lists:keyfind(Module, 2, Handlers) of
                   false -> false;
                   {Path, Module} -> {true, {ThisTls, Port, Path}}
               end;
          (_) -> false
       end, ets:tab2list(ejabberd_listener)).
+
+report_hostmeta_listener() ->
+    case {find_handler_port_path(false, ?MODULE),
+          find_handler_port_path(true, ?MODULE)} of
+        {[], []} ->
+            ?CRITICAL_MSG("It seems you enabled ~p in 'modules' but forgot to "
+                          "add it as a request_handler in an ejabberd_http "
+                          "listener.", [?MODULE]);
+        {[_|_], _} ->
+            ?WARNING_MSG("Apparently ~p is enabled in a request_handler in a "
+                         "non-encrypted ejabberd_http listener. This is "
+                         "disallowed by XEP-0156. Please enable 'tls' in that "
+                         "listener, or setup a proxy encryption mechanism.",
+                         [?MODULE]);
+        {[], [_|_]} ->
+            ok
+    end.
 
 %%%----------------------------------------------------------------------
 %%% Options and Doc
@@ -192,11 +211,12 @@ mod_doc() ->
           [?T("This module serves small 'host-meta' files as described in "
               "https://xmpp.org/extensions/xep-0156.html[XEP-0156: Discovering "
               "Alternative XMPP Connection Methods]."), "",
-           ?T("This module is available since ejabberd 22.05."), "",
            ?T("To use this module, in addition to adding it to the 'modules' "
               "section, you must also enable it in 'listen' -> 'ejabberd_http' -> "
-              "http://../listen-options/#request-handlers[request_handlers]."), "",
-           ?T("Notice it only works if ejabberd_http has tls enabled.")],
+              "_`listen-options.md#request_handlers|request_handlers`_."), "",
+           ?T("Notice it only works if _`listen.md#ejabberd_http|ejabberd_http`_ "
+              "has _`listen-options.md#tls|tls`_ enabled.")],
+      note => "added in 22.05",
       example =>
           ["listen:",
            "  -",

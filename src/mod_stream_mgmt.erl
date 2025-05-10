@@ -3,7 +3,7 @@
 %%% Created : 25 Dec 2016 by Evgeny Khramtsov <ekhramtsov@process-one.net>
 %%%
 %%%
-%%% ejabberd, Copyright (C) 2002-2022   ProcessOne
+%%% ejabberd, Copyright (C) 2002-2025   ProcessOne
 %%%
 %%% This program is free software; you can redistribute it and/or
 %%% modify it under the terms of the GNU General Public License as
@@ -23,7 +23,7 @@
 -module(mod_stream_mgmt).
 -behaviour(gen_mod).
 -author('holger@zedat.fu-berlin.de').
--protocol({xep, 198, '1.5.2'}).
+-protocol({xep, 198, '1.5.2', '14.05', "complete", ""}).
 
 %% gen_mod API
 -export([start/2, stop/1, reload/3, depends/2, mod_opt_type/1, mod_options/1]).
@@ -32,10 +32,15 @@
 -export([c2s_stream_started/2, c2s_stream_features/2,
 	 c2s_authenticated_packet/2, c2s_unauthenticated_packet/2,
 	 c2s_unbinded_packet/2, c2s_closed/2, c2s_terminated/2,
-	 c2s_handle_send/3, c2s_handle_info/2, c2s_handle_call/3,
-	 c2s_handle_recv/3]).
+	 c2s_handle_send/3, c2s_handle_info/2, c2s_handle_cast/2,
+	 c2s_handle_call/3, c2s_handle_recv/3, c2s_inline_features/2,
+	 c2s_handle_sasl2_inline/1, c2s_handle_sasl2_inline_post/3,
+	 c2s_handle_bind2_inline/1]).
 %% adjust pending session timeout / access queue
 -export([get_resume_timeout/1, set_resume_timeout/2, queue_find/2]).
+
+%% for sasl2 inline resume
+-export([has_resume_data/2, post_resume_tasks/1]).
 
 -include_lib("xmpp/include/xmpp.hrl").
 -include("logger.hrl").
@@ -61,42 +66,27 @@
 %%%===================================================================
 %%% API
 %%%===================================================================
-start(Host, Opts) ->
+start(_Host, Opts) ->
     init_cache(Opts),
-    ejabberd_hooks:add(c2s_stream_started, Host, ?MODULE,
-		       c2s_stream_started, 50),
-    ejabberd_hooks:add(c2s_post_auth_features, Host, ?MODULE,
-		       c2s_stream_features, 50),
-    ejabberd_hooks:add(c2s_unauthenticated_packet, Host, ?MODULE,
-		       c2s_unauthenticated_packet, 50),
-    ejabberd_hooks:add(c2s_unbinded_packet, Host, ?MODULE,
-		       c2s_unbinded_packet, 50),
-    ejabberd_hooks:add(c2s_authenticated_packet, Host, ?MODULE,
-		       c2s_authenticated_packet, 50),
-    ejabberd_hooks:add(c2s_handle_send, Host, ?MODULE, c2s_handle_send, 50),
-    ejabberd_hooks:add(c2s_handle_recv, Host, ?MODULE, c2s_handle_recv, 50),
-    ejabberd_hooks:add(c2s_handle_info, Host, ?MODULE, c2s_handle_info, 50),
-    ejabberd_hooks:add(c2s_handle_call, Host, ?MODULE, c2s_handle_call, 50),
-    ejabberd_hooks:add(c2s_closed, Host, ?MODULE, c2s_closed, 50),
-    ejabberd_hooks:add(c2s_terminated, Host, ?MODULE, c2s_terminated, 50).
+    {ok, [{hook, c2s_stream_started, c2s_stream_started, 50},
+          {hook, c2s_post_auth_features, c2s_stream_features, 50},
+	  {hook, c2s_inline_features, c2s_inline_features, 50},
+          {hook, c2s_unauthenticated_packet, c2s_unauthenticated_packet, 50},
+          {hook, c2s_unbinded_packet, c2s_unbinded_packet, 50},
+          {hook, c2s_authenticated_packet, c2s_authenticated_packet, 50},
+          {hook, c2s_handle_send, c2s_handle_send, 50},
+          {hook, c2s_handle_recv, c2s_handle_recv, 50},
+          {hook, c2s_handle_info, c2s_handle_info, 50},
+          {hook, c2s_handle_cast, c2s_handle_cast, 50},
+          {hook, c2s_handle_call, c2s_handle_call, 50},
+	  {hook, c2s_handle_sasl2_inline, c2s_handle_sasl2_inline, 50},
+	  {hook, c2s_handle_sasl2_inline_post, c2s_handle_sasl2_inline_post, 50},
+	  {hook, c2s_handle_bind2_inline, c2s_handle_bind2_inline, 50},
+          {hook, c2s_closed, c2s_closed, 50},
+          {hook, c2s_terminated, c2s_terminated, 50}]}.
 
-stop(Host) ->
-    ejabberd_hooks:delete(c2s_stream_started, Host, ?MODULE,
-			  c2s_stream_started, 50),
-    ejabberd_hooks:delete(c2s_post_auth_features, Host, ?MODULE,
-			  c2s_stream_features, 50),
-    ejabberd_hooks:delete(c2s_unauthenticated_packet, Host, ?MODULE,
-			  c2s_unauthenticated_packet, 50),
-    ejabberd_hooks:delete(c2s_unbinded_packet, Host, ?MODULE,
-			  c2s_unbinded_packet, 50),
-    ejabberd_hooks:delete(c2s_authenticated_packet, Host, ?MODULE,
-			  c2s_authenticated_packet, 50),
-    ejabberd_hooks:delete(c2s_handle_send, Host, ?MODULE, c2s_handle_send, 50),
-    ejabberd_hooks:delete(c2s_handle_recv, Host, ?MODULE, c2s_handle_recv, 50),
-    ejabberd_hooks:delete(c2s_handle_info, Host, ?MODULE, c2s_handle_info, 50),
-    ejabberd_hooks:delete(c2s_handle_call, Host, ?MODULE, c2s_handle_call, 50),
-    ejabberd_hooks:delete(c2s_closed, Host, ?MODULE, c2s_closed, 50),
-    ejabberd_hooks:delete(c2s_terminated, Host, ?MODULE, c2s_terminated, 50).
+stop(_Host) ->
+    ok.
 
 reload(_Host, NewOpts, _OldOpts) ->
     init_cache(NewOpts),
@@ -130,6 +120,47 @@ c2s_stream_features(Acc, Host) ->
 	     #feature_sm{xmlns = ?NS_STREAM_MGMT_3}|Acc];
 	false ->
 	    Acc
+    end.
+
+c2s_inline_features({Sasl, Bind, Extra} = Acc, Host) ->
+    case gen_mod:is_loaded(Host, ?MODULE) of
+	true ->
+	    {[#feature_sm{xmlns = ?NS_STREAM_MGMT_3} | Sasl],
+	     [#bind2_feature{var = ?NS_STREAM_MGMT_3} | Bind],
+	     Extra};
+	false ->
+	    Acc
+    end.
+
+c2s_handle_sasl2_inline({State, Els, Results} = Acc) ->
+    case lists:keytake(sm_resume, 1, Els) of
+	{value, Resume, Rest} ->
+	    case has_resume_data(State, Resume) of
+		{ok, NewState, Resumed} ->
+		    Rest2 = lists:keydelete(bind2_bind, 1, Rest),
+		    {NewState, Rest2, [Resumed | Results]};
+		{error, ResumeError, _Reason} ->
+		    {State, Els, [ResumeError | Results]}
+	    end;
+	_ ->
+	    Acc
+    end.
+
+c2s_handle_sasl2_inline_post(State, _Els, Results) ->
+    case lists:keyfind(sm_resumed, 1, Results) of
+	false ->
+	    State;
+	_ ->
+	    post_resume_tasks(State)
+    end.
+
+c2s_handle_bind2_inline({State, Els, Results}) ->
+    case lists:keyfind(sm_enable, 1, Els) of
+	#sm_enable{xmlns = XMLNS} = Pkt ->
+	    {State2, Res} = handle_enable_int(State#{mgmt_xmlns => XMLNS}, Pkt),
+	    {State2, Els, [Res | Results]};
+	_ ->
+	    {State, Els, Results}
     end.
 
 c2s_unauthenticated_packet(#{lang := Lang} = State, Pkt) when ?is_sm_packet(Pkt) ->
@@ -227,6 +258,13 @@ c2s_handle_send(#{mgmt_state := MgmtState, mod := Mod,
 	    State
     end;
 c2s_handle_send(State, _Pkt, _Result) ->
+    State.
+
+c2s_handle_cast(#{mgmt_state := active} = State, send_ping) ->
+    {stop, send_rack(State)};
+c2s_handle_cast(#{mgmt_state := pending} = State, send_ping) ->
+    {stop, State};
+c2s_handle_cast(State, _Msg) ->
     State.
 
 c2s_handle_call(#{mgmt_id := MgmtID, mgmt_queue := Queue, mod := Mod} = State,
@@ -372,28 +410,28 @@ perform_stream_mgmt(Pkt, #{mgmt_xmlns := Xmlns, lang := Lang} = State) ->
 				   xmlns = Xmlns})
     end.
 
--spec handle_enable(state(), sm_enable()) -> state().
-handle_enable(#{mgmt_timeout := DefaultTimeout,
-		mgmt_queue_type := QueueType,
-		mgmt_max_timeout := MaxTimeout,
-		mgmt_xmlns := Xmlns, jid := JID} = State,
-	      #sm_enable{resume = Resume, max = Max}) ->
+-spec handle_enable_int(state(), sm_enable()) -> {state(), sm_enabled()}.
+handle_enable_int(#{mgmt_timeout := DefaultTimeout,
+		    mgmt_queue_type := QueueType,
+		    mgmt_max_timeout := MaxTimeout,
+		    mgmt_xmlns := Xmlns, jid := JID} = State,
+		  #sm_enable{resume = Resume, max = Max}) ->
     State1 = State#{mgmt_id => make_id()},
     Timeout = if Resume == false ->
-		      0;
-		 Max /= undefined, Max > 0, Max*1000 =< MaxTimeout ->
+	0;
+		  Max /= undefined, Max > 0, Max*1000 =< MaxTimeout ->
 		      Max*1000;
-		 true ->
+		  true ->
 		      DefaultTimeout
 	      end,
     Res = if Timeout > 0 ->
-		  ?DEBUG("Stream management with resumption enabled for ~ts",
-			 [jid:encode(JID)]),
-		  #sm_enabled{xmlns = Xmlns,
-			      id = encode_id(State1),
-			      resume = true,
-			      max = Timeout div 1000};
-	     true ->
+	?DEBUG("Stream management with resumption enabled for ~ts",
+	       [jid:encode(JID)]),
+	#sm_enabled{xmlns = Xmlns,
+		    id = encode_id(State1),
+		    resume = true,
+		    max = Timeout div 1000};
+	      true ->
 		  ?DEBUG("Stream management without resumption enabled for ~ts",
 			 [jid:encode(JID)]),
 		  #sm_enabled{xmlns = Xmlns}
@@ -401,6 +439,11 @@ handle_enable(#{mgmt_timeout := DefaultTimeout,
     State2 = State1#{mgmt_state => active,
 		     mgmt_queue => p1_queue:new(QueueType),
 		     mgmt_timeout => Timeout},
+    {State2, Res}.
+
+-spec handle_enable(state(), sm_enable()) -> state().
+handle_enable(State, Enable) ->
+    {State2, Res} = handle_enable_int(State, Enable),
     send(State2, Res).
 
 -spec handle_r(state()) -> state().
@@ -414,38 +457,47 @@ handle_a(State, #sm_a{h = H}) ->
     resend_rack(State1).
 
 -spec handle_resume(state(), sm_resume()) -> {ok, state()} | {error, state()}.
-handle_resume(#{user := User, lserver := LServer,
-		lang := Lang, socket := Socket} = State,
-	      #sm_resume{h = H, previd = PrevID, xmlns = Xmlns}) ->
-    R = case inherit_session_state(State, PrevID) of
-	    {ok, InheritedState} ->
-		{ok, InheritedState, H};
-	    {error, Err, InH} ->
-		{error, #sm_failed{reason = 'item-not-found',
-				   text = xmpp:mk_text(format_error(Err), Lang),
-				   h = InH, xmlns = Xmlns}, Err};
-	    {error, Err} ->
-		{error, #sm_failed{reason = 'item-not-found',
-				   text = xmpp:mk_text(format_error(Err), Lang),
-				   xmlns = Xmlns}, Err}
-	end,
-    case R of
-	{ok, #{jid := JID} = ResumedState, NumHandled} ->
-	    State1 = check_h_attribute(ResumedState, NumHandled),
-	    #{mgmt_xmlns := AttrXmlns, mgmt_stanzas_in := AttrH} = State1,
-	    State2 = send(State1, #sm_resumed{xmlns = AttrXmlns,
-					      h = AttrH,
-					      previd = PrevID}),
-	    State3 = resend_unacked_stanzas(State2),
-	    State4 = send(State3, #sm_r{xmlns = AttrXmlns}),
-	    State5 = ejabberd_hooks:run_fold(c2s_session_resumed, LServer, State4, []),
-	    ?INFO_MSG("(~ts) Resumed session for ~ts",
-		      [xmpp_socket:pp(Socket), jid:encode(JID)]),
-	    {ok, State5};
+handle_resume(#{user := User, lserver := LServer} = State,
+	      #sm_resume{} = Resume) ->
+    case has_resume_data(State, Resume) of
+	{ok, ResumedState, ResumedEl} ->
+	    State2 = send(ResumedState, ResumedEl),
+	    {ok, post_resume_tasks(State2)};
 	{error, El, Reason} ->
 	    log_resumption_error(User, LServer, Reason),
 	    {error, send(State, El)}
     end.
+
+-spec has_resume_data(state(), sm_resume()) ->
+    {ok, state(), sm_resumed()} | {error, sm_failed(), error_reason()}.
+has_resume_data(#{lang := Lang} = State,
+		#sm_resume{h = H, previd = PrevID, xmlns = Xmlns}) ->
+    case inherit_session_state(State, PrevID) of
+	{ok, InheritedState} ->
+	    State1 = check_h_attribute(InheritedState, H),
+	    #{mgmt_xmlns := AttrXmlns, mgmt_stanzas_in := AttrH} = State1,
+	    {ok, State1, #sm_resumed{xmlns = AttrXmlns,
+				     h = AttrH,
+				     previd = PrevID}};
+	{error, Err, InH} ->
+	    {error, #sm_failed{reason = 'item-not-found',
+			       text = xmpp:mk_text(format_error(Err), Lang),
+			       h = InH, xmlns = Xmlns}, Err};
+	{error, Err} ->
+	    {error, #sm_failed{reason = 'item-not-found',
+			       text = xmpp:mk_text(format_error(Err), Lang),
+			       xmlns = Xmlns}, Err}
+    end.
+
+-spec post_resume_tasks(state()) -> state().
+post_resume_tasks(#{lserver := LServer, socket := Socket, jid := JID,
+		    mgmt_xmlns := AttrXmlns} = State) ->
+    State3 = resend_unacked_stanzas(State),
+    State4 = send(State3, #sm_r{xmlns = AttrXmlns}),
+    State5 = ejabberd_hooks:run_fold(c2s_session_resumed, LServer, State4, []),
+    ?INFO_MSG("(~ts) Resumed session for ~ts",
+	      [xmpp_socket:pp(Socket), jid:encode(JID)]),
+    State5.
 
 -spec transition_to_pending(state(), _) -> state().
 transition_to_pending(#{mgmt_state := active, mod := Mod,
@@ -899,7 +951,7 @@ mod_doc() ->
              "https://xmpp.org/extensions/xep-0198.html"
              "[XEP-0198: Stream Management]. This protocol allows "
              "active management of an XML stream between two XMPP "
-             "entities, including features for stanza acknowledgements "
+             "entities, including features for stanza acknowledgments "
              "and stream resumption."),
       opts =>
           [{max_ack_queue,
@@ -941,7 +993,7 @@ mod_doc() ->
            {ack_timeout,
             #{value => "timeout()",
               desc =>
-                  ?T("A time to wait for stanza acknowledgements. "
+                  ?T("A time to wait for stanza acknowledgments. "
                      "Setting it to 'infinity' effectively disables the timeout. "
                      "The default value is '1' minute.")}},
            {resend_on_timeout,

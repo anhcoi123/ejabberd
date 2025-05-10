@@ -5,7 +5,7 @@
 %%% Created : 17 Nov 2016 by Christophe Romain <christophe.romain@process-one.net>
 %%%
 %%%
-%%% ejabberd, Copyright (C) 2002-2022   ProcessOne
+%%% ejabberd, Copyright (C) 2002-2025   ProcessOne
 %%%
 %%% This program is free software; you can redistribute it and/or
 %%% modify it under the terms of the GNU General Public License as
@@ -39,7 +39,6 @@
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2,
 	 terminate/2, code_change/3]).
 
--define(STORAGE_TYPES, [disc_copies, disc_only_copies, ram_copies]).
 -define(NEED_RESET, [local_content, type]).
 
 -include("logger.hrl").
@@ -172,7 +171,10 @@ change_table_copy_type(Name, TabDef) ->
     if NewType /= CurrType ->
 	    ?INFO_MSG("Changing Mnesia table '~ts' from ~ts to ~ts",
 		      [Name, CurrType, NewType]),
-	    mnesia_op(change_table_copy_type, [Name, node(), NewType]);
+	    if CurrType == unknown -> mnesia_op(add_table_copy, [Name, node(), NewType]);
+		true ->
+		    mnesia_op(change_table_copy_type, [Name, node(), NewType])
+	    end;
        true ->
 	    {atomic, ok}
     end.

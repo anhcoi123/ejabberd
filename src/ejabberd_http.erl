@@ -5,7 +5,7 @@
 %%% Created : 27 Feb 2004 by Alexey Shchepin <alexey@process-one.net>
 %%%
 %%%
-%%% ejabberd, Copyright (C) 2002-2022   ProcessOne
+%%% ejabberd, Copyright (C) 2002-2025   ProcessOne
 %%%
 %%% This program is free software; you can redistribute it and/or
 %%% modify it under the terms of the GNU General Public License as
@@ -39,6 +39,7 @@
 -include("logger.hrl").
 -include_lib("xmpp/include/xmpp.hrl").
 -include("ejabberd_http.hrl").
+-include("ejabberd_stacktrace.hrl").
 -include_lib("kernel/include/file.hrl").
 
 -record(state, {sockmod,
@@ -68,6 +69,7 @@
 		default_host,
 		custom_headers,
 		trail = <<>>,
+		allow_unencrypted_sasl2,
 		addr_re,
 		sock_peer_name = none
 	       }).
@@ -132,10 +134,12 @@ init(SockMod, Socket, Opts) ->
 
     CustomHeaders = proplists:get_value(custom_headers, Opts, []),
 
+    AllowUnencryptedSasl2 = proplists:get_bool(allow_unencrypted_sasl2, Opts),
     State = #state{sockmod = SockMod1,
                    socket = Socket1,
 		   custom_headers = CustomHeaders,
 		   options = Opts,
+		   allow_unencrypted_sasl2 = AllowUnencryptedSasl2,
 		   request_handlers = RequestHandlers,
 		   sock_peer_name = SockPeer,
 		   addr_re = RE},
@@ -370,7 +374,15 @@ process(Handlers, Request) ->
 			HandlerModule:socket_handoff(
 			  LocalPath, Request, HandlerOpts);
 		    false ->
-			HandlerModule:process(LocalPath, Request)
+                        try
+                            HandlerModule:process(LocalPath, Request)
+                        catch
+                            ?EX_RULE(Class, Reason, Stack) ->
+                                ?ERROR_MSG(
+                                   "HTTP handler crashed: ~s",
+                                   [misc:format_exception(2, Class, Reason, ?EX_STACK(Stack))]),
+                                erlang:raise(Class, Reason, ?EX_STACK(Stack))
+                        end
 		end,
             ejabberd_hooks:run(http_request_debug, [{LocalPath, Request}]),
             R;
@@ -535,12 +547,14 @@ analyze_ip_xff({IPLast, Port}, XFF) ->
 				       TrustedProxies)
 		   of
 		 true ->
-		     {ok, IPFirst} = inet_parse:address(
-                                       binary_to_list(ClientIP)),
-		     ?DEBUG("The IP ~w was replaced with ~w due to "
-			    "header X-Forwarded-For: ~ts",
-			    [IPLast, IPFirst, XFF]),
-		     IPFirst;
+		     case inet_parse:address(binary_to_list(ClientIP)) of
+			 {ok, IPFirst} ->
+			     ?DEBUG("The IP ~w was replaced with ~w due to "
+				    "header X-Forwarded-For: ~ts",
+				    [IPLast, IPFirst, XFF]),
+			     IPFirst;
+			 E -> throw(E)
+		     end;
 		 false -> IPLast
 	       end,
     {IPClient, Port}.
@@ -905,6 +919,8 @@ normalize_path([Part | Path], Norm) ->
 
 listen_opt_type(tag) ->
     econf:binary();
+listen_opt_type(allow_unencrypted_sasl2) ->
+    econf:bool();
 listen_opt_type(request_handlers) ->
     econf:map(
       econf:and_then(
@@ -916,12 +932,7 @@ listen_opt_type(default_host) ->
 listen_opt_type(custom_headers) ->
     econf:map(
       econf:binary(),
-      econf:and_then(
-	econf:binary(),
-	fun(V) ->
-		misc:expand_keyword(<<"@VERSION@">>, V,
-				    ejabberd_option:version())
-	end)).
+      econf:binary()).
 
 listen_options() ->
     [{ciphers, undefined},
@@ -930,6 +941,7 @@ listen_options() ->
      {protocol_options, undefined},
      {tls, false},
      {tls_compression, false},
+     {allow_unencrypted_sasl2, false},
      {request_handlers, []},
      {tag, <<>>},
      {default_host, undefined},

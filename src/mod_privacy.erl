@@ -5,7 +5,7 @@
 %%% Created : 21 Jul 2003 by Alexey Shchepin <alexey@process-one.net>
 %%%
 %%%
-%%% ejabberd, Copyright (C) 2002-2022   ProcessOne
+%%% ejabberd, Copyright (C) 2002-2025   ProcessOne
 %%%
 %%% This program is free software; you can redistribute it and/or
 %%% modify it under the terms of the GNU General Public License as
@@ -27,7 +27,7 @@
 
 -author('alexey@process-one.net').
 
--protocol({xep, 16, '1.6'}).
+-protocol({xep, 16, '1.6', '0.5.0', "complete", ""}).
 
 -behaviour(gen_mod).
 
@@ -40,8 +40,14 @@
 	 import_start/2, import_stop/2, import/5, import_info/0,
 	 mod_opt_type/1, mod_options/1, depends/2]).
 
+-export([webadmin_menu_hostuser/4, webadmin_page_hostuser/4]).
+
+-import(ejabberd_web_admin, [make_command/4, make_command/2]).
+
 -include("logger.hrl").
 -include_lib("xmpp/include/xmpp.hrl").
+-include("ejabberd_http.hrl").
+-include("ejabberd_web_admin.hrl").
 -include("mod_privacy.hrl").
 -include("translate.hrl").
 
@@ -73,32 +79,17 @@ start(Host, Opts) ->
     Mod = gen_mod:db_mod(Opts, ?MODULE),
     Mod:init(Host, Opts),
     init_cache(Mod, Host, Opts),
-    ejabberd_hooks:add(disco_local_features, Host, ?MODULE,
-		       disco_features, 50),
-    ejabberd_hooks:add(c2s_copy_session, Host, ?MODULE,
-		       c2s_copy_session, 50),
-    ejabberd_hooks:add(user_send_packet, Host, ?MODULE,
-		       user_send_packet, 50),
-    ejabberd_hooks:add(privacy_check_packet, Host, ?MODULE,
-		       check_packet, 50),
-    ejabberd_hooks:add(remove_user, Host, ?MODULE,
-		       remove_user, 50),
-    gen_iq_handler:add_iq_handler(ejabberd_sm, Host,
-				  ?NS_PRIVACY, ?MODULE, process_iq).
+    {ok, [{hook, disco_local_features, disco_features, 50},
+          {hook, c2s_copy_session, c2s_copy_session, 50},
+          {hook, user_send_packet, user_send_packet, 50},
+          {hook, privacy_check_packet, check_packet, 50},
+          {hook, remove_user, remove_user, 50},
+          {hook, webadmin_menu_hostuser, webadmin_menu_hostuser, 50},
+          {hook, webadmin_page_hostuser, webadmin_page_hostuser, 50},
+          {iq_handler, ejabberd_sm, ?NS_PRIVACY, process_iq}]}.
 
-stop(Host) ->
-    ejabberd_hooks:delete(disco_local_features, Host, ?MODULE,
-			  disco_features, 50),
-    ejabberd_hooks:delete(c2s_copy_session, Host, ?MODULE,
-			  c2s_copy_session, 50),
-    ejabberd_hooks:delete(user_send_packet, Host, ?MODULE,
-			  user_send_packet, 50),
-    ejabberd_hooks:delete(privacy_check_packet, Host,
-			  ?MODULE, check_packet, 50),
-    ejabberd_hooks:delete(remove_user, Host, ?MODULE,
-			  remove_user, 50),
-    gen_iq_handler:remove_iq_handler(ejabberd_sm, Host,
-				     ?NS_PRIVACY).
+stop(_Host) ->
+    ok.
 
 reload(Host, NewOpts, OldOpts) ->
     NewMod = gen_mod:db_mod(NewOpts, ?MODULE),
@@ -857,6 +848,24 @@ export(LServer) ->
     Mod = gen_mod:db_mod(LServer, ?MODULE),
     Mod:export(LServer).
 
+%%%
+%%% WebAdmin
+%%%
+
+webadmin_menu_hostuser(Acc, _Host, _Username, _Lang) ->
+    Acc ++ [{<<"privacy">>, <<"Privacy Lists">>}].
+
+webadmin_page_hostuser(_, Host, User,
+	      #request{us = _US, path = [<<"privacy">>]} = R) ->
+    Res = ?H1GL(<<"Privacy Lists">>, <<"modules/#mod_privacy">>, <<"mod_privacy">>)
+          ++ [make_command(privacy_set, R, [{<<"user">>, User}, {<<"host">>, Host}], [])],
+    {stop, Res};
+webadmin_page_hostuser(Acc, _, _, _) -> Acc.
+
+%%%
+%%% Documentation
+%%%
+
 depends(_Host, _Opts) ->
     [].
 
@@ -886,8 +895,8 @@ mod_doc() ->
            ?T("NOTE: Nowadays modern XMPP clients rely on "
               "https://xmpp.org/extensions/xep-0191.html"
               "[XEP-0191: Blocking Command] which is implemented by "
-              "'mod_blocking' module. However, you still need "
-              "'mod_privacy' loaded in order for _`mod_blocking`_ to work.")],
+              "_`mod_blocking`_. However, you still need "
+              "'mod_privacy' loaded in order for 'mod_blocking' to work.")],
       opts =>
           [{db_type,
             #{value => "mnesia | sql",

@@ -5,7 +5,7 @@
 %%% Created : 11 Jan 2004 by Alexey Shchepin <alexey@process-one.net>
 %%%
 %%%
-%%% ejabberd, Copyright (C) 2002-2022   ProcessOne
+%%% ejabberd, Copyright (C) 2002-2025   ProcessOne
 %%%
 %%% This program is free software; you can redistribute it and/or
 %%% modify it under the terms of the GNU General Public License as
@@ -23,20 +23,21 @@
 %%%
 %%%----------------------------------------------------------------------
 
-%%% Does not support commands that have arguments with ctypes: list, tuple
-
 -module(ejabberd_ctl).
 
 -behaviour(gen_server).
 -author('alexey@process-one.net').
 
--export([start/0, start_link/0, process/1, process2/2]).
+-export([start/0, start_link/0, process/1, process/2, process2/2]).
 %% gen_server callbacks
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2,
 	 terminate/2, code_change/3]).
+-export([get_commands_spec/0, format_arg/2,
+         get_usage_command/4]).
 
 -include("ejabberd_ctl.hrl").
 -include("ejabberd_commands.hrl").
+-include("ejabberd_http.hrl").
 -include("logger.hrl").
 -include("ejabberd_stacktrace.hrl").
 
@@ -92,6 +93,7 @@ start_link() ->
     gen_server:start_link({local, ?MODULE}, ?MODULE, [], []).
 
 init([]) ->
+    ejabberd_commands:register_commands(?MODULE, get_commands_spec()),
     {ok, #state{}}.
 
 handle_call(Request, From, State) ->
@@ -107,21 +109,51 @@ handle_info(Info, State) ->
     {noreply, State}.
 
 terminate(_Reason, _State) ->
+    ejabberd_commands:unregister_commands(get_commands_spec()),
     ok.
 
 code_change(_OldVsn, State, _Extra) ->
     {ok, State}.
 
 %%-----------------------------
-%% Process
+%% Process http
+%%-----------------------------
+
+-spec process_http([binary()], tuple()) -> {non_neg_integer(), [{binary(), binary()}], string()}.
+
+process_http([_Call], #request{data = Data, path = [<<"ctl">> | _]}) ->
+    Args = [binary_to_list(E) || E <- misc:json_decode(Data)],
+    process_http2(Args, ?DEFAULT_VERSION).
+
+process_http2(["--version", Arg | Args], _) ->
+    Version =
+	try
+	    list_to_integer(Arg)
+	catch _:_ ->
+		throw({invalid_version, Arg})
+	end,
+    process_http2(Args, Version);
+
+process_http2(Args, Version) ->
+    {String, Code} = process2(Args, [], Version),
+    String2 = case String of
+                  [] -> String;
+                  _ -> [String, "\n"]
+              end,
+    {200, [{<<"status-code">>, integer_to_binary(Code)}], String2}.
+
+%%-----------------------------
+%% Process command line
 %%-----------------------------
 
 -spec process([string()]) -> non_neg_integer().
 process(Args) ->
     process(Args, ?DEFAULT_VERSION).
 
+-spec process([string() | binary()], non_neg_integer() | tuple()) -> non_neg_integer().
 
--spec process([string()], non_neg_integer()) -> non_neg_integer().
+process([Call], Request) when is_binary(Call) and is_record(Request, request) ->
+    process_http([Call], Request);
 
 %% The commands status, stop and restart are defined here to ensure
 %% they are usable even if ejabberd is completely stopped.
@@ -144,20 +176,12 @@ process(["status"], _Version) ->
 %% TODO: Mnesia operations should not be hardcoded in ejabberd_ctl module.
 %% For now, I leave them there to avoid breaking those commands for people that
 %% may be using it (as format of response is going to change).
-process(["mnesia"], _Version) ->
-    print("~p~n", [mnesia:system_info(all)]),
-    ?STATUS_SUCCESS;
-
-process(["mnesia", "info"], _Version) ->
+process(["mnesia_info_ctl"], _Version) ->
     mnesia:info(),
     ?STATUS_SUCCESS;
 
-process(["mnesia", Arg], _Version) ->
-    case catch mnesia:system_info(list_to_atom(Arg)) of
-	{'EXIT', Error} -> print("Error: ~p~n", [Error]);
-	Return -> print("~p~n", [Return])
-    end,
-    ?STATUS_SUCCESS;
+process(["print_sql_schema", DBType, DBVersion, NewSchema], _Version) ->
+    ejabberd_sql_schema:print_schema(DBType, DBVersion, NewSchema);
 
 %% The arguments --long and --dual are not documented because they are
 %% automatically selected depending in the number of columns of the shell
@@ -238,7 +262,7 @@ process2(Args, AccessCommands, Auth, Version) ->
 	    io:format(lists:flatten(["\n" | String]++["\n"])),
 	    [CommandString | _] = Args,
             process(["help" | [CommandString]], Version),
-	    {lists:flatten(String), ?STATUS_ERROR};
+	    {lists:flatten(String), ?STATUS_USAGE};
 	{String, Code}
           when is_list(String) and is_integer(Code) ->
 	    {lists:flatten(String), Code};
@@ -277,7 +301,7 @@ try_run_ctp(Args, Auth, AccessCommands, Version) ->
 	    try_call_command(Args, Auth, AccessCommands, Version);
 	false ->
 	    print_usage(Version),
-	    {"", ?STATUS_USAGE};
+	    {"", ?STATUS_BADRPC};
 	Status ->
 	    {"", Status}
     catch
@@ -294,7 +318,7 @@ try_run_ctp(Args, Auth, AccessCommands, Version) ->
 try_call_command(Args, Auth, AccessCommands, Version) ->
     try call_command(Args, Auth, AccessCommands, Version) of
 	{Reason, wrong_command_arguments} ->
-	    {Reason, ?STATUS_ERROR};
+	    {Reason, ?STATUS_USAGE};
 	Res ->
 	    Res
     catch
@@ -335,14 +359,14 @@ call_command([CmdString | Args], Auth, _AccessCommands, Version) ->
 							ArgsFormatted,
 							CI2,
 							Version),
-	    format_result(Result, ResultFormat);
-	{'EXIT', {function_clause,[{lists,zip,[A1, A2], _} | _]}} ->
+	    format_result_preliminary(Result, ResultFormat, Version);
+	{'EXIT', {function_clause,[{lists,zip,[A1,A2|_], _} | _]}} ->
 	    {NumCompa, TextCompa} =
 		case {length(A1), length(A2)} of
 		    {L1, L2} when L1 < L2 -> {L2-L1, "less argument"};
 		    {L1, L2} when L1 > L2 -> {L1-L2, "more argument"}
 		end,
-	    process(["help" | [CmdString]]),
+	    process(["help" | [CmdString]], Version),
 	    {io_lib:format("Error: the command '~ts' requires ~p ~ts.",
 			   [CmdString, NumCompa, TextCompa]),
 	     wrong_command_arguments}
@@ -372,9 +396,16 @@ format_arg(Arg, string) ->
     NumChars = integer_to_list(length(Arg)),
     Parse = "~" ++ NumChars ++ "c",
     format_arg2(Arg, Parse);
+format_arg(Arg, {list, {_ArgName, ArgFormat}}) ->
+    [format_arg(string:trim(Element), ArgFormat) || Element <- string:tokens(Arg, ",")];
+format_arg(Arg, {list, ArgFormat}) ->
+    [format_arg(string:trim(Element), ArgFormat) || Element <- string:tokens(Arg, ",")];
+format_arg(Arg, {tuple, Elements}) ->
+    Args = string:tokens(Arg, ":"),
+    list_to_tuple(format_args(Args, Elements));
 format_arg(Arg, Format) ->
     S = unicode:characters_to_binary(Arg, utf8),
-    JSON = jiffy:decode(S),
+    JSON = misc:json_decode(S),
     mod_http_api:format_arg(JSON, Format).
 
 format_arg2(Arg, Parse)->
@@ -385,52 +416,77 @@ format_arg2(Arg, Parse)->
 %% Format result
 %%-----------------------------
 
-format_result({error, ErrorAtom}, _) ->
+format_result_preliminary(Result, {A, {list, B}}, Version) ->
+    format_result(Result, {A, {top_result_list, B}}, Version);
+format_result_preliminary(Result, ResultFormat, Version) ->
+    format_result(Result, ResultFormat, Version).
+
+format_result({error, ErrorAtom}, _, _Version) ->
     {io_lib:format("Error: ~p", [ErrorAtom]), make_status(error)};
 
 %% An error should always be allowed to return extended error to help with API.
 %% Extended error is of the form:
 %%  {error, type :: atom(), code :: int(), Desc :: string()}
-format_result({error, ErrorAtom, Code, Msg}, _) ->
+format_result({error, ErrorAtom, Code, Msg}, _, _Version) ->
     {io_lib:format("Error: ~p: ~s", [ErrorAtom, Msg]), make_status(Code)};
 
-format_result(Atom, {_Name, atom}) ->
+format_result(Atom, {_Name, atom}, _Version) ->
     io_lib:format("~p", [Atom]);
 
-format_result(Int, {_Name, integer}) ->
+format_result(Int, {_Name, integer}, _Version) ->
     io_lib:format("~p", [Int]);
 
-format_result([A|_]=String, {_Name, string}) when is_list(String) and is_integer(A) ->
+format_result([A|_]=String, {_Name, string}, _Version) when is_list(String) and is_integer(A) ->
     io_lib:format("~ts", [String]);
 
-format_result(Binary, {_Name, string}) when is_binary(Binary) ->
-    io_lib:format("~ts", [binary_to_list(Binary)]);
+format_result(Binary, {_Name, binary}, _Version) when is_binary(Binary) ->
+    io_lib:format("~ts", [Binary]);
 
-format_result(Atom, {_Name, string}) when is_atom(Atom) ->
+format_result(String, {_Name, binary}, _Version) when is_list(String) ->
+    io_lib:format("~ts", [String]);
+
+format_result(Binary, {_Name, string}, _Version) when is_binary(Binary) ->
+    io_lib:format("~ts", [Binary]);
+
+format_result(Atom, {_Name, string}, _Version) when is_atom(Atom) ->
     io_lib:format("~ts", [atom_to_list(Atom)]);
 
-format_result(Integer, {_Name, string}) when is_integer(Integer) ->
+format_result(Integer, {_Name, string}, _Version) when is_integer(Integer) ->
     io_lib:format("~ts", [integer_to_list(Integer)]);
 
-format_result(Other, {_Name, string})  ->
+format_result(Other, {_Name, string}, _Version)  ->
     io_lib:format("~p", [Other]);
 
-format_result(Code, {_Name, rescode}) ->
+format_result(Code, {_Name, rescode}, _Version) ->
     make_status(Code);
 
-format_result({Code, Text}, {_Name, restuple}) ->
+format_result({Code, Text}, {_Name, restuple}, _Version) ->
     {io_lib:format("~ts", [Text]), make_status(Code)};
 
-%% The result is a list of something: [something()]
-format_result([], {_Name, {list, _ElementsDef}}) ->
+format_result([], {_Name, {top_result_list, _ElementsDef}}, _Version) ->
     "";
-format_result([FirstElement | Elements], {_Name, {list, ElementsDef}}) ->
+format_result([FirstElement | Elements], {_Name, {top_result_list, ElementsDef}}, Version) ->
+    [format_result(FirstElement, ElementsDef, Version) |
+     lists:map(
+       fun(Element) ->
+	       ["\n" | format_result(Element, ElementsDef, Version)]
+       end,
+       Elements)];
+
+%% The result is a list of something: [something()]
+format_result([], {_Name, {list, _ElementsDef}}, _Version) ->
+    "";
+format_result([FirstElement | Elements], {_Name, {list, ElementsDef}}, Version) ->
+    Separator = case Version of
+                    0 -> ";";
+                    _ -> ","
+                end,
     %% Start formatting the first element
-    [format_result(FirstElement, ElementsDef) |
+    [format_result(FirstElement, ElementsDef, Version) |
      %% If there are more elements, put always first a newline character
      lists:map(
        fun(Element) ->
-	       ["\n" | format_result(Element, ElementsDef)]
+	       [Separator | format_result(Element, ElementsDef, Version)]
        end,
        Elements)];
 
@@ -438,17 +494,17 @@ format_result([FirstElement | Elements], {_Name, {list, ElementsDef}}) ->
 %% NOTE: the elements in the tuple are separated with tabular characters,
 %% if a string is empty, it will be difficult to notice in the shell,
 %% maybe a different separation character should be used, like ;;?
-format_result(ElementsTuple, {_Name, {tuple, ElementsDef}}) ->
+format_result(ElementsTuple, {_Name, {tuple, ElementsDef}}, Version) ->
     ElementsList = tuple_to_list(ElementsTuple),
     [{FirstE, FirstD} | ElementsAndDef] = lists:zip(ElementsList, ElementsDef),
-    [format_result(FirstE, FirstD) |
+    [format_result(FirstE, FirstD, Version) |
      lists:map(
        fun({Element, ElementDef}) ->
-	       ["\t" | format_result(Element, ElementDef)]
+	       ["\t" | format_result(Element, ElementDef, Version)]
        end,
        ElementsAndDef)];
 
-format_result(404, {_Name, _}) ->
+format_result(404, {_Name, _}, _Version) ->
     make_status(not_found).
 
 make_status(ok) -> ?STATUS_SUCCESS;
@@ -462,11 +518,7 @@ make_status(Error) ->
 get_list_commands(Version) ->
     try ejabberd_commands:list_commands(Version) of
 	Commands ->
-	    [tuple_command_help(Command)
-	     || {N,_,_}=Command <- Commands,
-		%% Don't show again those commands, because they are already
-		%% announced by ejabberd_ctl itself
-		N /= status, N /= stop, N /= restart]
+	    [tuple_command_help(Command) || Command <- Commands]
     catch
 	exit:_ ->
 	    []
@@ -476,19 +528,24 @@ get_list_commands(Version) ->
 tuple_command_help({Name, _Args, Desc}) ->
     {Args, _, _} = ejabberd_commands:get_command_format(Name, admin),
     Arguments = [atom_to_list(ArgN) || {ArgN, _ArgF} <- Args],
-    Prepend = case is_supported_args(Args) of
-		  true -> "";
-		  false -> "*"
-	      end,
     CallString = atom_to_list(Name),
-    {CallString, Arguments, Prepend ++ Desc}.
+    {CallString, Arguments, Desc}.
 
-is_supported_args(Args) ->
-    lists:all(
-      fun({_Name, Format}) ->
-	      (Format == integer)
-		  or (Format == string)
-		      or (Format == binary)
+has_tuple_args(Args) ->
+    lists:any(
+      fun({_Name, tuple}) -> true;
+         ({_Name, {tuple, _}}) -> true;
+         ({_Name, {list, SubArg}}) ->
+            has_tuple_args([SubArg]);
+         (_) -> false
+      end,
+      Args).
+
+has_list_args(Args) ->
+    lists:any(
+      fun({_Name, list}) -> true;
+         ({_Name, {list, _}}) -> true;
+         (_) -> false
       end,
       Args).
 
@@ -498,7 +555,7 @@ is_supported_args(Args) ->
 
 %% Commands are Bold
 -define(B1, "\e[1m").
--define(B2, "\e[21m").
+-define(B2, "\e[22m").
 -define(C(S), case ShCode of true -> [?B1, S, ?B2]; false -> S end).
 
 %% Arguments are Dim
@@ -520,17 +577,11 @@ print_usage(Version) ->
     {MaxC, ShCode} = get_shell_info(),
     print_usage(dual, MaxC, ShCode, Version).
 print_usage(HelpMode, MaxC, ShCode, Version) ->
-    AllCommands =
-	[
-	 {"help", ["[arguments]"], "Get help"},
-	 {"status", [], "Get ejabberd status"},
-	 {"stop", [], "Stop ejabberd"},
-	 {"restart", [], "Restart ejabberd"},
-	 {"mnesia", ["[info]"], "show information of Mnesia system"}] ++
-	get_list_commands(Version),
+    AllCommands = get_list_commands(Version),
 
     print(
-       ["Usage: ", "ejabberdctl", " [--no-timeout] [--node ", ?A("nodename"), "] [--version ", ?A("api_version"), "] ",
+       ["Usage: ", "ejabberdctl", " [--no-timeout] [--node ", ?A("name"), "] [--version ", ?A("apiv"), "] ",
+        "[--auth ", ?A("user host pass"), "] ",
 	?C("command"), " [", ?A("arguments"), "]\n"
 	"\n"
 	"Available commands in this ejabberd node:\n"], []),
@@ -578,17 +629,9 @@ get_shell_info() ->
 	_:_ -> {78, false}
     end.
 
-%% Erlang/OTP 20.0 introduced string:find/2, but we must support old 19.3
-string_find([], _SearchPattern) ->
-    nomatch;
-string_find([A | String], [A]) ->
-    String;
-string_find([_ | String], SearchPattern) ->
-    string_find(String, SearchPattern).
-
 %% Split this command description in several lines of proper length
 prepare_description(DescInit, MaxC, Desc) ->
-    case string_find(Desc, "\n") of
+    case string:find(Desc, "\n") of
         nomatch ->
             prepare_description2(DescInit, MaxC, Desc);
         _ ->
@@ -753,9 +796,13 @@ print_usage_help(MaxC, ShCode) ->
 	 "  ejabberdctl ", ?C("help"), " ", ?C("register"), "\n",
 	 "  ejabberdctl ", ?C("help"), " ", ?C("regist*"), "\n",
 	 "\n",
-	 "Please note that 'ejabberdctl' shows all ejabberd commands,\n",
-	 "even those that cannot be used in the shell with ejabberdctl.\n",
-	 "Those commands can be identified because their description starts with: *"],
+	 "Some command arguments are lists or tuples, like add_rosteritem and create_room_with_opts.\n",
+	 "Separate the elements in a list with the , character.\n",
+	 "Separate the elements in a tuple with the : character.\n",
+	 "\n",
+	 "Some commands results are lists or tuples, like get_roster and get_user_subscriptions.\n",
+	 "The elements in a list are separated with a , character.\n",
+	 "The elements in a tuple are separated with a tabular character.\n"],
     ArgsDef = [],
     C = #ejabberd_commands{
 	   name = help,
@@ -763,7 +810,7 @@ print_usage_help(MaxC, ShCode) ->
 	   longdesc = lists:flatten(LongDesc),
 	   args = ArgsDef,
 	   result = {help, string}},
-    print_usage_command2("help", C, MaxC, ShCode).
+    print(get_usage_command2("help", C, MaxC, ShCode), []).
 
 
 %%-----------------------------
@@ -817,26 +864,42 @@ filter_commands_regexp(All, Glob) ->
       end,
       All).
 
+maybe_add_policy_arguments(Args, user) ->
+    [{user, binary}, {host, binary} | Args];
+maybe_add_policy_arguments(Args, _) ->
+    Args.
+
 -spec print_usage_command(Cmd::string(), MaxC::integer(),
                           ShCode::boolean(), Version::integer()) -> ok.
 print_usage_command(Cmd, MaxC, ShCode, Version) ->
+    print(get_usage_command(Cmd, MaxC, ShCode, Version), []).
+
+get_usage_command(Cmd, MaxC, ShCode, Version) ->
     Name = list_to_atom(Cmd),
     C = ejabberd_commands:get_command_definition(Name, Version),
-    print_usage_command2(Cmd, C, MaxC, ShCode).
+    get_usage_command2(Cmd, C, MaxC, ShCode).
 
-print_usage_command2(Cmd, C, MaxC, ShCode) ->
+get_usage_command2(Cmd, C, MaxC, ShCode) ->
     #ejabberd_commands{
 		     tags = TagsAtoms,
 		     definer = Definer,
 		     desc = Desc,
-		     args = ArgsDef,
+		     args = ArgsDefPreliminary,
+		     args_desc = ArgsDesc,
+		     args_example = ArgsExample,
+		     result_example = ResultExample,
+		     policy = Policy,
 		     longdesc = LongDesc,
+		     note = Note,
 		     result = ResultDef} = C,
 
     NameFmt = ["  ", ?B("Command Name"), ": ", ?C(Cmd), "\n"],
 
     %% Initial indentation of result is 13 = length("  Arguments: ")
-    Args = [format_usage_ctype(ArgDef, 13) || ArgDef <- ArgsDef],
+    ArgsDef = maybe_add_policy_arguments(ArgsDefPreliminary, Policy),
+    ArgsDetailed = add_args_desc(ArgsDef, ArgsDesc),
+    Args = [format_usage_ctype1(ArgDetailed, 13, ShCode) || ArgDetailed <- ArgsDetailed],
+
     ArgsMargin = lists:duplicate(13, $\s),
     ArgsListFmt = case Args of
 		      [] -> "\n";
@@ -846,19 +909,32 @@ print_usage_command2(Cmd, C, MaxC, ShCode) ->
 
     %% Initial indentation of result is 11 = length("  Returns: ")
     ResultFmt = format_usage_ctype(ResultDef, 11),
-    ReturnsFmt = ["  ",?B("Returns"),": ", ResultFmt],
+    ReturnsFmt = ["  ",?B("Result"),": ", ResultFmt],
 
-    XmlrpcFmt = "", %%+++ ["  ",?B("XML-RPC"),": ", format_usage_xmlrpc(ArgsDef, ResultDef), "\n\n"],
+    ExampleMargin = lists:duplicate(11, $\s),
+    Example = format_usage_example(Cmd, ArgsExample, ResultExample, ExampleMargin),
+    ExampleFmt = case Example of
+		      [] ->
+                            "";
+		      _ ->
+                            ExampleListFmt = [ [Ex, "\n", ExampleMargin] || Ex <- Example],
+                            ["  ",?B("Example"),": ", ExampleListFmt, "\n"]
+		  end,
 
     TagsFmt = ["  ",?B("Tags"),":", prepare_long_line(8, MaxC, [?G(atom_to_list(TagA)) || TagA <- TagsAtoms])],
 
     IsDefinerMod = case Definer of
                      unknown -> true;
-                     _ -> lists:member(gen_mod, proplists:get_value(behaviour, Definer:module_info(attributes)))
+                     _ -> lists:member([gen_mod], proplists:get_all_values(behaviour, Definer:module_info(attributes)))
                  end,
     ModuleFmt = case IsDefinerMod of
                     true -> ["  ",?B("Module"),": ", atom_to_list(Definer), "\n\n"];
                     false -> []
+                end,
+
+    NoteFmt = case Note of
+                    "" -> [];
+                    _ -> ["  ",?B("Note"),": ", Note, "\n\n"]
                 end,
 
     DescFmt = ["  ",?B("Description"),":", prepare_description(15, MaxC, Desc)],
@@ -868,24 +944,69 @@ print_usage_command2(Cmd, C, MaxC, ShCode) ->
 		      _ -> ["", prepare_description(0, MaxC, LongDesc), "\n\n"]
 		  end,
 
-    NoteEjabberdctl = case is_supported_args(ArgsDef) of
-			  true -> "";
-			  false -> ["  ", ?B("Note:"), " This command cannot be executed using ejabberdctl. Try ejabberd_xmlrpc.\n\n"]
+    NoteEjabberdctlList = case has_list_args(ArgsDefPreliminary) of
+			  true -> ["  ", ?B("Note:"), " In a list argument, separate the elements using the , character for example: one,two,three\n\n"];
+			  false -> ""
+		      end,
+    NoteEjabberdctlTuple = case has_tuple_args(ArgsDefPreliminary) of
+			  true -> ["  ", ?B("Note:"), " In a tuple argument, separate the elements using the : character for example: members_only:true\n\n"];
+			  false -> ""
 		      end,
 
-    case Cmd of
-        "help" -> ok;
-        _ -> print([NameFmt, "\n", ArgsFmt, "\n", ReturnsFmt,
-                    "\n\n", XmlrpcFmt, TagsFmt, "\n\n", ModuleFmt, DescFmt, "\n\n"], [])
+    First = case Cmd of
+        "help" -> "";
+        _ -> [NameFmt, "\n", ArgsFmt, "\n", ReturnsFmt,
+                    "\n\n", ExampleFmt, TagsFmt, "\n\n", ModuleFmt, NoteFmt, DescFmt, "\n\n"]
     end,
-    print([LongDescFmt, NoteEjabberdctl], []).
+    [First, LongDescFmt, NoteEjabberdctlList, NoteEjabberdctlTuple].
+
+%%-----------------------------
+%% Format Arguments Help
+%%-----------------------------
+
+add_args_desc(Definitions, none) ->
+    Descriptions = lists:duplicate(length(Definitions), ""),
+    add_args_desc(Definitions, Descriptions);
+add_args_desc(Definitions, Descriptions) ->
+    lists:zipwith(fun({Name, Type}, Description) ->
+                          {Name, Type, Description} end,
+                  Definitions,
+                  Descriptions).
+
+format_usage_ctype1({_Name, _Type} = Definition, Indentation, ShCode) ->
+    [Arg] = add_args_desc([Definition], none),
+    format_usage_ctype1(Arg, Indentation, ShCode);
+format_usage_ctype1({Name, Type, Description}, Indentation, ShCode) ->
+    TypeString = case Type of
+        {list, ElementDef} ->
+            NameFmt = atom_to_list(Name),
+            Indentation2 = Indentation + length(NameFmt) + 4,
+            ElementFmt = format_usage_ctype1(ElementDef, Indentation2, ShCode),
+            io_lib:format("[ ~s ]", [lists:flatten(ElementFmt)]);
+        {tuple, ElementsDef} ->
+            NameFmt = atom_to_list(Name),
+            Indentation2 = Indentation + length(NameFmt) + 4,
+            ElementsFmt = format_usage_tuple(ElementsDef, Indentation2),
+            io_lib:format("{ ~s }", [lists:flatten(ElementsFmt)]);
+        _ ->
+            Type
+    end,
+    DescriptionText = case Description of
+                          "" -> "";
+                          Description -> " : "++Description
+                      end,
+    io_lib:format("~p::~s~s", [Name, TypeString, DescriptionText]).
+
 
 format_usage_ctype(Type, _Indentation)
-  when (Type==atom) or (Type==integer) or (Type==string) or (Type==binary) or (Type==rescode) or (Type==restuple)->
+  when (Type==atom) or (Type==integer) or (Type==string) or (Type==binary)
+       or (Type==rescode) or (Type==restuple) ->
     io_lib:format("~p", [Type]);
 
 format_usage_ctype({Name, Type}, _Indentation)
-  when (Type==atom) or (Type==integer) or (Type==string) or (Type==binary) or (Type==rescode) or (Type==restuple)->
+  when (Type==atom) or (Type==integer) or (Type==string) or (Type==binary)
+       or (Type==rescode) or (Type==restuple)
+       or (Type==any) ->
     io_lib:format("~p::~p", [Name, Type]);
 
 format_usage_ctype({Name, {list, ElementDef}}, Indentation) ->
@@ -898,12 +1019,13 @@ format_usage_ctype({Name, {tuple, ElementsDef}}, Indentation) ->
     NameFmt = atom_to_list(Name),
     Indentation2 = Indentation + length(NameFmt) + 4,
     ElementsFmt = format_usage_tuple(ElementsDef, Indentation2),
-    [NameFmt, "::{ " | ElementsFmt].
+    [NameFmt, "::{ "] ++ ElementsFmt ++ [" }"].
+
 
 format_usage_tuple([], _Indentation) ->
     [];
 format_usage_tuple([ElementDef], Indentation) ->
-    [format_usage_ctype(ElementDef, Indentation) , " }"];
+    format_usage_ctype(ElementDef, Indentation);
 format_usage_tuple([ElementDef | ElementsDef], Indentation) ->
     ElementFmt = format_usage_ctype(ElementDef, Indentation),
     MarginString = lists:duplicate(Indentation, $\s), % Put spaces
@@ -919,3 +1041,126 @@ disable_logging() ->
 disable_logging() ->
     logger:set_primary_config(level, none).
 -endif.
+
+%%-----------------------------
+%% Format Example Help
+%%-----------------------------
+
+format_usage_example(_Cmd, none, _ResultExample, _Indentation) ->
+    "";
+format_usage_example(Cmd, ArgsExample, ResultExample, Indentation) ->
+    Arguments = format_usage_arguments(ArgsExample, []),
+    Result = format_usage_result([ResultExample], [], Indentation),
+    [lists:join(" ", ["ejabberdctl", Cmd] ++ Arguments) | Result].
+
+format_usage_arguments([], R) ->
+    lists:reverse(R);
+
+format_usage_arguments([Argument | Arguments], R)
+  when is_integer(Argument) ->
+    format_usage_arguments(Arguments, [integer_to_list(Argument) | R]);
+
+format_usage_arguments([[Integer|_] = Argument | Arguments], R)
+  when is_list(Argument) and is_integer(Integer) ->
+    Result = case contains_more_than_letters(Argument) of
+                 true -> ["\"", Argument, "\""];
+                 false -> [Argument]
+             end,
+    format_usage_arguments(Arguments, [Result | R]);
+
+format_usage_arguments([[Element | _] = Argument | Arguments], R)
+  when is_list(Argument) and is_tuple(Element) ->
+    ArgumentFmt = format_usage_arguments(Argument, []),
+    format_usage_arguments(Arguments, [lists:join(",", ArgumentFmt) | R]);
+
+format_usage_arguments([Argument | Arguments], R)
+  when is_list(Argument) ->
+    Result = format_usage_arguments(Argument, []),
+    format_usage_arguments(Arguments, [lists:join(",", Result) | R]);
+
+format_usage_arguments([Argument | Arguments], R)
+  when is_tuple(Argument) ->
+    Result = format_usage_arguments(tuple_to_list(Argument), []),
+    format_usage_arguments(Arguments, [lists:join(":", Result) | R]);
+
+format_usage_arguments([Argument | Arguments], R)
+  when is_binary(Argument) ->
+    Result = case contains_more_than_letters(binary_to_list(Argument)) of
+                 true -> ["\"", Argument, "\""];
+                 false -> [Argument]
+             end,
+    format_usage_arguments(Arguments, [Result | R]);
+
+format_usage_arguments([Argument | Arguments], R) ->
+    format_usage_arguments(Arguments, [Argument | R]).
+
+format_usage_result([none], _R, _Indentation) ->
+    "";
+format_usage_result([], R, _Indentation) ->
+    lists:reverse(R);
+
+format_usage_result([{Code, Text} | Arguments], R, Indentation)
+  when is_atom(Code) and is_binary(Text) ->
+    format_usage_result(Arguments, [Text | R], Indentation);
+
+format_usage_result([Argument | Arguments], R, Indentation)
+  when is_atom(Argument) ->
+    format_usage_result(Arguments, [["\'", atom_to_list(Argument), "\'"] | R], Indentation);
+
+format_usage_result([Argument | Arguments], R, Indentation)
+  when is_integer(Argument) ->
+    format_usage_result(Arguments, [integer_to_list(Argument) | R], Indentation);
+
+format_usage_result([[Integer|_] = Argument | Arguments], R, Indentation)
+  when is_list(Argument) and is_integer(Integer) ->
+    format_usage_result(Arguments, [Argument | R], Indentation);
+
+format_usage_result([[Element | _] = Argument | Arguments], R, Indentation)
+  when is_list(Argument) and is_tuple(Element) ->
+    ArgumentFmt = format_usage_result(Argument, [], Indentation),
+    format_usage_result(Arguments, [lists:join("\n"++Indentation, ArgumentFmt) | R], Indentation);
+
+format_usage_result([Argument | Arguments], R, Indentation)
+  when is_list(Argument) ->
+    format_usage_result(Arguments, [lists:join("\n"++Indentation, Argument) | R], Indentation);
+
+format_usage_result([Argument | Arguments], R, Indentation)
+  when is_tuple(Argument) ->
+    Result = format_usage_result(tuple_to_list(Argument), [], Indentation),
+    format_usage_result(Arguments, [lists:join("\t", Result) | R], Indentation);
+
+format_usage_result([Argument | Arguments], R, Indentation) ->
+    format_usage_result(Arguments, [Argument | R], Indentation).
+
+contains_more_than_letters(Argument) ->
+    lists:any(fun(I) when (I < $A) -> true;
+                 (I) when (I > $z) -> true;
+                 (_) -> false end,
+              Argument).
+
+%%-----------------------------
+%% Register commands
+%%-----------------------------
+
+get_commands_spec() ->
+    [
+     #ejabberd_commands{name = help, tags = [ejabberdctl],
+			desc = "Get list of commands, or help of a command (only ejabberdctl)",
+			longdesc = "This command is exclusive for the ejabberdctl command-line script, "
+			"don't attempt to execute it using any other API frontend."},
+     #ejabberd_commands{name = mnesia_info_ctl, tags = [ejabberdctl, mnesia],
+			desc = "Show information of Mnesia system (only ejabberdctl)",
+			note = "renamed in 24.02",
+			longdesc = "This command is exclusive for the ejabberdctl command-line script, "
+			"don't attempt to execute it using any other API frontend."},
+     #ejabberd_commands{name = print_sql_schema, tags = [ejabberdctl, sql],
+			desc = "Print SQL schema for the given RDBMS (only ejabberdctl)",
+			longdesc = "This command is exclusive for the ejabberdctl command-line script, "
+			"don't attempt to execute it using any other API frontend.",
+			note = "added in 24.02",
+			args = [{db_type, string}, {db_version, string}, {new_schema, string}],
+                        args_desc = ["Database type: pgsql | mysql | sqlite",
+                                     "Your database version: 16.1, 8.2.0...",
+                                     "Use new schema: 0, false, 1 or true"],
+                        args_example = ["pgsql", "16.1", "true"]}
+    ].

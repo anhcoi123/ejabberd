@@ -1,13 +1,33 @@
-Vars = case file:consult(filename:join([filename:dirname(SCRIPT), "..", "vars.config"])) of
+{Vars, ElixirApps} = case file:consult(filename:join([filename:dirname(SCRIPT), "..", "vars.config"])) of
     {ok, Terms} ->
         Backends = [mssql, mysql, odbc, pgsql, redis, sqlite],
         EBs = lists:filter(fun(Backend) -> lists:member({Backend, true}, Terms) end, Backends),
-        [lists:keyfind(description, 1, Terms),
+        Elixirs = case proplists:get_bool(elixir, Terms) of
+            true -> [elixir, logger, mix];
+            false -> []
+        end,
+
+        ProfileEnvironmentVariable = os:getenv("REBAR_PROFILE"),
+        AsProfiles = case lists:dropwhile(fun("as") -> false; (_) -> true end,
+                                               init:get_plain_arguments()) of
+                              ["as", Profiles | _] -> string:split(Profiles, ",");
+                              _ -> []
+                          end,
+        Terms2 = case lists:member("dev", [ProfileEnvironmentVariable | AsProfiles]) of
+            true -> lists:keystore(tools, 1, Terms, {tools, true});
+            false -> Terms
+        end,
+        Tools = case lists:keyfind(tools, 1, Terms2) of
+            {tools, true} -> [observer];
+            _ -> []
+        end,
+
+        {[lists:keyfind(description, 1, Terms),
          lists:keyfind(vsn, 1, Terms),
          {env, [{enabled_backends, EBs}]}
-        ];
+        ], Elixirs ++ Tools};
     _Err ->
-        []
+        {[], []}
     end,
 
 {application, ejabberd,
@@ -27,7 +47,7 @@ Vars = case file:consult(filename:join([filename:dirname(SCRIPT), "..", "vars.co
      pkix,
      stringprep,
      yconf,
-     xmpp]},
+     xmpp | ElixirApps]},
   {mod, {ejabberd_app, []}}]}.
 
 %% Local Variables:

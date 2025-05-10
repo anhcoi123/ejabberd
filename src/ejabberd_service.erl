@@ -2,7 +2,7 @@
 %%% Created : 11 Dec 2016 by Evgeny Khramtsov <ekhramtsov@process-one.net>
 %%%
 %%%
-%%% ejabberd, Copyright (C) 2002-2022   ProcessOne
+%%% ejabberd, Copyright (C) 2002-2025   ProcessOne
 %%%
 %%% This program is free software; you can redistribute it and/or
 %%% modify it under the terms of the GNU General Public License as
@@ -23,7 +23,7 @@
 -behaviour(xmpp_stream_in).
 -behaviour(ejabberd_listener).
 
--protocol({xep, 114, '1.6'}).
+-protocol({xep, 114, '1.6', '0.1.0', "complete", ""}).
 
 %% ejabberd_listener callbacks
 -export([start/3, start_link/3, stop/0, accept/1]).

@@ -1,6 +1,6 @@
 %%%----------------------------------------------------------------------
 %%%
-%%% ejabberd, Copyright (C) 2002-2022   ProcessOne
+%%% ejabberd, Copyright (C) 2002-2025   ProcessOne
 %%%
 %%% This program is free software; you can redistribute it and/or
 %%% modify it under the terms of the GNU General Public License as
@@ -18,5 +18,11 @@
 %%%
 %%%----------------------------------------------------------------------
 
--record(vcard_xupdate, {us = {<<>>, <<>>} :: {binary(), binary()},
-                        hash = <<>>       :: binary()}).
+-record(room_version,
+        {id :: binary(),
+         %% use the same field names as in Synapse
+         knock_restricted_join_rule :: boolean(),
+         enforce_int_power_levels :: boolean(),
+         implicit_room_creator :: boolean(),
+         updated_redaction_rules :: boolean()
+        }).

@@ -3,7 +3,7 @@
 %%% Created : 27 Jun 2013 by Evgeniy Khramtsov <ekhramtsov@process-one.net>
 %%%
 %%%
-%%% ejabberd, Copyright (C) 2002-2022   ProcessOne
+%%% ejabberd, Copyright (C) 2002-2025   ProcessOne
 %%%
 %%% This program is free software; you can redistribute it and/or
 %%% modify it under the terms of the GNU General Public License as
@@ -59,6 +59,7 @@ init_config(Config) ->
 		      [{c2s_port, 5222},
 		       {loglevel, 4},
 		       {new_schema, false},
+		       {update_sql_schema, true},
 		       {s2s_port, 5269},
 		       {stun_port, 3478},
 		       {component_port, 5270},
@@ -83,6 +84,7 @@ init_config(Config) ->
 		       {priv_dir, PrivDir}]),
     MacrosPath = filename:join([CWD, "macros.yml"]),
     ok = file:write_file(MacrosPath, MacrosContent),
+    copy_configtest_yml(DataDir, CWD),
     copy_backend_configs(DataDir, CWD, Backends),
     setup_ejabberd_lib_path(Config),
     case application:load(sasl) of
@@ -131,15 +133,37 @@ init_config(Config) ->
      {resource, <<"resource!@#$%^&*()'\"`~<>+-/;:_=[]{}|\\">>},
      {master_resource, <<"master_resource!@#$%^&*()'\"`~<>+-/;:_=[]{}|\\">>},
      {slave_resource, <<"slave_resource!@#$%^&*()'\"`~<>+-/;:_=[]{}|\\">>},
+     {update_sql, false},
      {password, Password},
      {backends, Backends}
      |Config].
+
+copy_configtest_yml(DataDir, CWD) ->
+    Files = filelib:wildcard(filename:join([DataDir, "configtest.yml"])),
+    lists:foreach(
+	fun(Src) ->
+	    ct:pal("copying ~p", [Src]),
+	    File = filename:basename(Src),
+	    case string:tokens(File, ".") of
+		["configtest", "yml"] ->
+		    Dst = filename:join([CWD, File]),
+		    case true of
+			true ->
+			    {ok, _} = file:copy(Src, Dst);
+			false ->
+			    ok
+		    end;
+		_ ->
+		    ok
+	    end
+	end, Files).
+
 
 copy_backend_configs(DataDir, CWD, Backends) ->
     Files = filelib:wildcard(filename:join([DataDir, "ejabberd.*.yml"])),
     lists:foreach(
 	fun(Src) ->
-	    io:format("copying ~p", [Src]),
+	    ct:pal("copying ~p", [Src]),
 	    File = filename:basename(Src),
 	    case string:tokens(File, ".") of
 		["ejabberd", SBackend, "yml"] ->
@@ -546,10 +570,11 @@ decode_stream_element(NS, El) ->
     decode(El, NS, []).
 
 format_element(El) ->
-    case erlang:function_exported(ct, log, 5) of
+    Bin = case erlang:function_exported(ct, log, 5) of
 	true -> ejabberd_web_admin:pretty_print_xml(El);
 	false -> io_lib:format("~p~n", [El])
-    end.
+    end,
+    binary:replace(Bin, <<"<">>, <<"&lt;">>, [global]).
 
 decode(El, NS, Opts) ->
     try

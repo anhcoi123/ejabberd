@@ -5,7 +5,7 @@
 %%% Created : 12 Oct 2006 by Evgeniy Khramtsov <xram@jabber.ru>
 %%%
 %%%
-%%% ejabberd, Copyright (C) 2002-2022   ProcessOne
+%%% ejabberd, Copyright (C) 2002-2025   ProcessOne
 %%%
 %%% This program is free software; you can redistribute it and/or
 %%% modify it under the terms of the GNU General Public License as
@@ -27,7 +27,7 @@
 
 -author('xram@jabber.ru').
 
--protocol({xep, 65, '1.8'}).
+-protocol({xep, 65, '1.8', '2.0.0', "complete", ""}).
 
 -behaviour(gen_mod).
 
@@ -237,23 +237,7 @@ mod_doc() ->
                      "by some XMPP clients in Service Discovery. The value of "
                      "'vCard' is a YAML map constructed from an XML representation "
                      "of vCard. Since the representation has no attributes, "
-                     "the mapping is straightforward."),
-              example =>
-                  [{?T("For example, the following XML representation of vCard:"),
-                    ["<vCard xmlns='vcard-temp'>",
-                     "  <FN>Conferences</FN>",
-                     "  <ADR>",
-                     "    <WORK/>",
-                     "    <STREET>Elm Street</STREET>",
-                     "  </ADR>",
-                     "</vCard>"]},
-                   {?T("will be translated to:"),
-                    ["vcard:",
-                     "  fn: Conferences",
-                     "  adr:",
-                     "    -",
-                     "      work: true",
-                     "      street: Elm Street"]}]}}],
+                     "the mapping is straightforward.")}}],
       example =>
           ["acl:",
            "  admin:",
@@ -274,7 +258,6 @@ mod_doc() ->
            "  proxyrate: 10240",
            "",
            "modules:",
-           "  ...",
            "  mod_proxy65:",
            "    host: proxy1.example.org",
            "    name: \"File Transfer Proxy\"",
@@ -284,5 +267,4 @@ mod_doc() ->
            "    access: proxy65_access",
            "    shaper: proxy65_shaper",
            "    recbuf: 10240",
-           "    sndbuf: 10240",
-           "  ..."]}.
+           "    sndbuf: 10240"]}.

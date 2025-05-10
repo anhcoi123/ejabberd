@@ -5,7 +5,7 @@
 %%% Created : 25 Dec 2016 by Alexey Shchepin <alexey@process-one.net>
 %%%
 %%%
-%%% ejabberd, Copyright (C) 2002-2022   ProcessOne
+%%% ejabberd, Copyright (C) 2002-2025   ProcessOne
 %%%
 %%% This program is free software; you can redistribute it and/or
 %%% modify it under the terms of the GNU General Public License as
@@ -32,7 +32,8 @@
 -export([start/2, stop/1, reload/3, mod_doc/0,
          depends/2, mod_opt_type/1, mod_options/1]).
 
--export([filter_packet/1, filter_offline_msg/1, filter_subscription/2]).
+-export([filter_packet/1, filter_offline_msg/1, filter_subscription/2,
+         get_sm_features/5]).
 
 -include_lib("xmpp/include/xmpp.hrl").
 -include("logger.hrl").
@@ -40,29 +41,35 @@
 
 -define(SETS, gb_sets).
 
+-define(NS_BLOCK_STRANGERS, <<"urn:ejabberd:block-strangers">>).
+
 -type c2s_state() :: ejabberd_c2s:state().
 
 %%%===================================================================
 %%% Callbacks and hooks
 %%%===================================================================
-start(Host, _Opts) ->
-    ejabberd_hooks:add(user_receive_packet, Host,
-                       ?MODULE, filter_packet, 25),
-    ejabberd_hooks:add(roster_in_subscription, Host,
-		       ?MODULE, filter_subscription, 25),
-    ejabberd_hooks:add(offline_message_hook, Host,
-		       ?MODULE, filter_offline_msg, 25).
+start(_Host, _Opts) ->
+    {ok, [{hook, disco_local_features, get_sm_features, 50},
+          {hook, disco_sm_features, get_sm_features, 50},
+          {hook, user_receive_packet, filter_packet, 25},
+          {hook, roster_in_subscription, filter_subscription, 25},
+          {hook, offline_message_hook, filter_offline_msg, 25}]}.
 
-stop(Host) ->
-    ejabberd_hooks:delete(user_receive_packet, Host,
-                          ?MODULE, filter_packet, 25),
-    ejabberd_hooks:delete(roster_in_subscription, Host,
-			  ?MODULE, filter_subscription, 25),
-    ejabberd_hooks:delete(offline_message_hook, Host,
-			  ?MODULE, filter_offline_msg, 25).
+stop(_Host) ->
+    ok.
 
 reload(_Host, _NewOpts, _OldOpts) ->
     ok.
+
+get_sm_features(Acc, _From, _To, <<"">>, _Lang) ->
+    Features = case Acc of
+		{result, I} -> I;
+		_ -> []
+	    end,
+    {result, [?NS_BLOCK_STRANGERS | Features]};
+
+get_sm_features(Acc, _From, _To, _Node, _Lang) ->
+    Acc.
 
 -spec filter_packet({stanza(), c2s_state()}) -> {stanza(), c2s_state()} |
 						{stop, {drop, c2s_state()}}.
@@ -264,7 +271,7 @@ mod_options(_) ->
 
 mod_doc() ->
     #{desc =>
-          ?T("This module allows to block/log messages coming from an "
+          ?T("This module blocks and logs any messages coming from an "
              "unknown entity. If a writing entity is not in your roster, "
              "you can let this module drop and/or log the message. "
              "By default you'll just not receive message from that entity. "
@@ -309,6 +316,6 @@ mod_doc() ->
               desc =>
                   ?T("Whether to generate CAPTCHA or not in response to "
                      "messages from strangers. See also section "
-                     "https://docs.ejabberd.im/admin/configuration/#captcha"
-                     "[CAPTCHA] of the Configuration Guide. "
+                     "_`basic.md#captcha|CAPTCHA`_"
+                     " of the Configuration Guide. "
                      "The default value is 'false'.")}}]}.

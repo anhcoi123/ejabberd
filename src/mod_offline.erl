@@ -5,7 +5,7 @@
 %%% Created :  5 Jan 2003 by Alexey Shchepin <alexey@process-one.net>
 %%%
 %%%
-%%% ejabberd, Copyright (C) 2002-2022   ProcessOne
+%%% ejabberd, Copyright (C) 2002-2025   ProcessOne
 %%%
 %%% This program is free software; you can redistribute it and/or
 %%% modify it under the terms of the GNU General Public License as
@@ -27,11 +27,12 @@
 
 -author('alexey@process-one.net').
 
--protocol({xep, 13, '1.2'}).
--protocol({xep, 22, '1.4'}).
--protocol({xep, 23, '1.3'}).
--protocol({xep, 160, '1.0'}).
--protocol({xep, 334, '0.2'}).
+-protocol({xep, 13, '1.2', '16.02', "complete", ""}).
+-protocol({xep, 22, '1.4', '0.1.0', "complete", ""}).
+-protocol({xep, 23, '1.3', '0.7.5', "complete", ""}).
+-protocol({xep, 160, '1.0', '16.01', "complete", ""}).
+-protocol({xep, 203, '2.0', '2.1.0', "complete", ""}).
+-protocol({xep, 334, '0.2', '16.01', "complete", ""}).
 
 -behaviour(gen_mod).
 
@@ -59,11 +60,16 @@
 	 find_x_expire/2,
 	 c2s_handle_info/2,
 	 c2s_copy_session/2,
-	 webadmin_page/3,
+         get_offline_messages/2,
+	 webadmin_menu_hostuser/4,
+	 webadmin_page_hostuser/4,
 	 webadmin_user/4,
-	 webadmin_user_parse_query/5]).
+	 webadmin_user_parse_query/5,
+	 c2s_handle_bind2_inline/1]).
 
 -export([mod_opt_type/1, mod_options/1, mod_doc/0, depends/2]).
+
+-import(ejabberd_web_admin, [make_command/4, make_command/2]).
 
 -deprecated({get_queue_length,2}).
 
@@ -78,8 +84,6 @@
 -include("mod_offline.hrl").
 
 -include("translate.hrl").
-
--define(OFFLINE_TABLE_LOCK_THRESHOLD, 1000).
 
 %% default value for the maximum number of user messages
 -define(MAX_USER_MESSAGES, infinity).
@@ -122,51 +126,25 @@ start(Host, Opts) ->
     Mod = gen_mod:db_mod(Opts, ?MODULE),
     Mod:init(Host, Opts),
     init_cache(Mod, Host, Opts),
-    ejabberd_hooks:add(offline_message_hook, Host, ?MODULE,
-		       store_packet, 50),
-    ejabberd_hooks:add(c2s_self_presence, Host, ?MODULE, c2s_self_presence, 50),
-    ejabberd_hooks:add(remove_user, Host,
-		       ?MODULE, remove_user, 50),
-    ejabberd_hooks:add(disco_sm_features, Host,
-		       ?MODULE, get_sm_features, 50),
-    ejabberd_hooks:add(disco_local_features, Host,
-		       ?MODULE, get_sm_features, 50),
-    ejabberd_hooks:add(disco_sm_identity, Host,
-		       ?MODULE, get_sm_identity, 50),
-    ejabberd_hooks:add(disco_sm_items, Host,
-		       ?MODULE, get_sm_items, 50),
-    ejabberd_hooks:add(disco_info, Host, ?MODULE, get_info, 50),
-    ejabberd_hooks:add(c2s_handle_info, Host, ?MODULE, c2s_handle_info, 50),
-    ejabberd_hooks:add(c2s_copy_session, Host, ?MODULE, c2s_copy_session, 50),
-    ejabberd_hooks:add(webadmin_page_host, Host,
-		       ?MODULE, webadmin_page, 50),
-    ejabberd_hooks:add(webadmin_user, Host,
-		       ?MODULE, webadmin_user, 50),
-    ejabberd_hooks:add(webadmin_user_parse_query, Host,
-		       ?MODULE, webadmin_user_parse_query, 50),
-    gen_iq_handler:add_iq_handler(ejabberd_sm, Host, ?NS_FLEX_OFFLINE,
-				  ?MODULE, handle_offline_query).
+    {ok, [{hook, offline_message_hook, store_packet, 50},
+          {hook, c2s_self_presence, c2s_self_presence, 50},
+          {hook, remove_user, remove_user, 50},
+          {hook, disco_sm_features, get_sm_features, 50},
+          {hook, disco_local_features, get_sm_features, 50},
+          {hook, disco_sm_identity, get_sm_identity, 50},
+          {hook, disco_sm_items, get_sm_items, 50},
+          {hook, disco_info, get_info, 50},
+          {hook, c2s_handle_info, c2s_handle_info, 50},
+          {hook, c2s_copy_session, c2s_copy_session, 50},
+	  {hook, c2s_handle_bind2_inline, c2s_handle_bind2_inline, 50},
+          {hook, webadmin_menu_hostuser, webadmin_menu_hostuser, 50},
+          {hook, webadmin_page_hostuser, webadmin_page_hostuser, 50},
+          {hook, webadmin_user, webadmin_user, 50},
+          {hook, webadmin_user_parse_query,  webadmin_user_parse_query, 50},
+          {iq_handler, ejabberd_sm, ?NS_FLEX_OFFLINE, handle_offline_query}]}.
 
-stop(Host) ->
-    ejabberd_hooks:delete(offline_message_hook, Host,
-			  ?MODULE, store_packet, 50),
-    ejabberd_hooks:delete(c2s_self_presence, Host, ?MODULE, c2s_self_presence, 50),
-    ejabberd_hooks:delete(remove_user, Host, ?MODULE,
-			  remove_user, 50),
-    ejabberd_hooks:delete(disco_sm_features, Host, ?MODULE, get_sm_features, 50),
-    ejabberd_hooks:delete(disco_local_features, Host, ?MODULE, get_sm_features, 50),
-    ejabberd_hooks:delete(disco_sm_identity, Host, ?MODULE, get_sm_identity, 50),
-    ejabberd_hooks:delete(disco_sm_items, Host, ?MODULE, get_sm_items, 50),
-    ejabberd_hooks:delete(disco_info, Host, ?MODULE, get_info, 50),
-    ejabberd_hooks:delete(c2s_handle_info, Host, ?MODULE, c2s_handle_info, 50),
-    ejabberd_hooks:delete(c2s_copy_session, Host, ?MODULE, c2s_copy_session, 50),
-    ejabberd_hooks:delete(webadmin_page_host, Host,
-			  ?MODULE, webadmin_page, 50),
-    ejabberd_hooks:delete(webadmin_user, Host,
-			  ?MODULE, webadmin_user, 50),
-    ejabberd_hooks:delete(webadmin_user_parse_query, Host,
-			  ?MODULE, webadmin_user_parse_query, 50),
-    gen_iq_handler:remove_iq_handler(ejabberd_sm, Host, ?NS_FLEX_OFFLINE).
+stop(_Host) ->
+    ok.
 
 reload(Host, NewOpts, OldOpts) ->
     NewMod = gen_mod:db_mod(NewOpts, ?MODULE),
@@ -327,6 +305,15 @@ c2s_copy_session(State, #{resend_offline := Flag}) ->
 c2s_copy_session(State, _) ->
     State.
 
+c2s_handle_bind2_inline({#{jid := #jid{luser = LUser, lserver = LServer}} = State, Els, Results}) ->
+    case mod_mam:is_archiving_enabled(LUser, LServer) of
+        true ->
+            delete_all_msgs(LUser, LServer);
+        false ->
+            ok
+    end,
+    {State, Els, Results}.
+
 -spec handle_offline_query(iq()) -> iq().
 handle_offline_query(#iq{from = #jid{luser = U1, lserver = S1},
 			 to = #jid{luser = U2, lserver = S2},
@@ -475,14 +462,17 @@ need_to_store(LServer, #message{type = Type} = Packet) ->
 					_ ->
 					    true
 				    end,
-			    case {Store, mod_offline_opt:store_empty_body(LServer)} of
-				{false, _} ->
+			    case {misc:get_mucsub_event_type(Packet), Store,
+				  mod_offline_opt:store_empty_body(LServer)} of
+				{?NS_MUCSUB_NODES_PRESENCE, _, _} ->
 				    false;
-				{_, true} ->
+				{_, false, _} ->
+				    false;
+				{_, _, true} ->
 				    true;
-				{_, false} ->
+				{_, _, false} ->
 				    Packet#message.body /= [];
-				{_, unless_chat_state} ->
+				{_, _, unless_chat_state} ->
 				    not misc:is_standalone_chat_state(Packet)
 			    end
 		    end
@@ -750,12 +740,39 @@ discard_warn_sender(Packet, Reason) ->
 	    ok
     end.
 
-webadmin_page(_, Host,
-	      #request{us = _US, path = [<<"user">>, U, <<"queue">>],
-		       q = Query, lang = Lang} =
-		  _Request) ->
-    Res = user_queue(U, Host, Query, Lang), {stop, Res};
-webadmin_page(Acc, _, _) -> Acc.
+%%%
+%%% Commands
+%%%
+
+get_offline_messages(User, Server) ->
+    LUser = jid:nodeprep(User),
+    LServer = jid:nameprep(Server),
+    Mod = gen_mod:db_mod(LServer, ?MODULE),
+    HdrsAll = case Mod:read_message_headers(LUser, LServer) of
+		  error -> [];
+		  L -> L
+	      end,
+    format_user_queue(HdrsAll).
+
+%%%
+%%% WebAdmin
+%%%
+
+webadmin_menu_hostuser(Acc, _Host, _Username, _Lang) ->
+    Acc ++ [{<<"queue">>, <<"Offline Queue">>}].
+
+webadmin_page_hostuser(_, Host, U,
+	      #request{us = _US, path = [<<"queue">> | RPath],
+		       lang = Lang} = R) ->
+    US = {U, Host},
+    PageTitle = str:translate_and_format(Lang, ?T("~ts's Offline Messages Queue"), [us_to_list(US)]),
+    Head = ?H1GL(PageTitle, <<"modules/#mod_offline">>, <<"mod_offline">>),
+    Res = make_command(get_offline_messages, R, [{<<"user">>, U},
+                                                     {<<"host">>, Host}],
+                        [{table_options, {10, RPath}},
+                         {result_links, [{packet, paragraph, 1, <<"">>}]}]),
+    {stop, Head ++ [Res]};
+webadmin_page_hostuser(Acc, _, _, _) -> Acc.
 
 get_offline_els(LUser, LServer) ->
     [Packet || {_Seq, Packet} <- read_messages(LUser, LServer)].
@@ -959,8 +976,7 @@ count_mam_messages(LUser, LServer, ReadMsgs) ->
 
 format_user_queue(Hdrs) ->
     lists:map(
-      fun({Seq, From, To, TS, El}) ->
-	      ID = integer_to_binary(Seq),
+      fun({_Seq, From, To, TS, El}) ->
 	      FPacket = ejabberd_web_admin:pretty_print_xml(El),
 	      SFrom = jid:encode(From),
 	      STo = jid:encode(To),
@@ -976,14 +992,7 @@ format_user_queue(Hdrs) ->
 			 {_, _, _} = Now ->
 			     format_time(Now)
 		     end,
-	      ?XE(<<"tr">>,
-		  [?XAE(<<"td">>, [{<<"class">>, <<"valign">>}],
-			[?INPUT(<<"checkbox">>, <<"selected">>, ID)]),
-		   ?XAC(<<"td">>, [{<<"class">>, <<"valign">>}], Time),
-		   ?XAC(<<"td">>, [{<<"class">>, <<"valign">>}], SFrom),
-		   ?XAC(<<"td">>, [{<<"class">>, <<"valign">>}], STo),
-		   ?XAE(<<"td">>, [{<<"class">>, <<"valign">>}],
-			[?XC(<<"pre">>, FPacket)])])
+              {Time, SFrom, STo, FPacket}
       end, Hdrs).
 
 format_time(Now) ->
@@ -991,111 +1000,20 @@ format_time(Now) ->
     str:format("~w-~.2.0w-~.2.0w ~.2.0w:~.2.0w:~.2.0w",
 	       [Year, Month, Day, Hour, Minute,	Second]).
 
-user_queue(User, Server, Query, Lang) ->
-    LUser = jid:nodeprep(User),
-    LServer = jid:nameprep(Server),
-    US = {LUser, LServer},
-    Mod = gen_mod:db_mod(LServer, ?MODULE),
-    user_queue_parse_query(LUser, LServer, Query),
-    HdrsAll = case Mod:read_message_headers(LUser, LServer) of
-		  error -> [];
-		  L -> L
-	      end,
-    Hdrs = get_messages_subset(User, Server, HdrsAll),
-    FMsgs = format_user_queue(Hdrs),
-    PageTitle = str:translate_and_format(Lang, ?T("~ts's Offline Messages Queue"), [us_to_list(US)]),
-    (?H1GL(PageTitle, <<"modules/#mod-offline">>, <<"mod_offline">>))
-      ++ [?XREST(?T("Submitted"))] ++
-	[?XAE(<<"form">>,
-	      [{<<"action">>, <<"">>}, {<<"method">>, <<"post">>}],
-	      [?XE(<<"table">>,
-		   [?XE(<<"thead">>,
-			[?XE(<<"tr">>,
-			     [?X(<<"td">>), ?XCT(<<"td">>, ?T("Time")),
-			      ?XCT(<<"td">>, ?T("From")),
-			      ?XCT(<<"td">>, ?T("To")),
-			      ?XCT(<<"td">>, ?T("Packet"))])]),
-		    ?XE(<<"tbody">>,
-			if FMsgs == [] ->
-			       [?XE(<<"tr">>,
-				    [?XAC(<<"td">>, [{<<"colspan">>, <<"4">>}],
-					  <<" ">>)])];
-			   true -> FMsgs
-			end)]),
-	       ?BR,
-	       ?INPUTTD(<<"submit">>, <<"delete">>,
-		       ?T("Delete Selected"))])].
-
-user_queue_parse_query(LUser, LServer, Query) ->
-    Mod = gen_mod:db_mod(LServer, ?MODULE),
-    case lists:keysearch(<<"delete">>, 1, Query) of
-	{value, _} ->
-	    case user_queue_parse_query(LUser, LServer, Query, Mod, false) of
-		true ->
-		    flush_cache(Mod, LUser, LServer);
-		false ->
-		    ok
-	    end;
-	_ ->
-	    ok
-    end.
-
-user_queue_parse_query(LUser, LServer, Query, Mod, Acc) ->
-    case lists:keytake(<<"selected">>, 1, Query) of
-	{value, {_, Seq}, Query2} ->
-	    NewAcc = case catch binary_to_integer(Seq) of
-			 I when is_integer(I), I>=0 ->
-			     Mod:remove_message(LUser, LServer, I),
-			     true;
-			 _ ->
-			     Acc
-		     end,
-	    user_queue_parse_query(LUser, LServer, Query2, Mod, NewAcc);
-	false ->
-	    Acc
-    end.
-
 us_to_list({User, Server}) ->
     jid:encode({User, Server, <<"">>}).
 
 get_queue_length(LUser, LServer) ->
     count_offline_messages(LUser, LServer).
 
-get_messages_subset(User, Host, MsgsAll) ->
-    MaxOfflineMsgs = case get_max_user_messages(User, Host) of
-		       Number when is_integer(Number) -> Number;
-		       _ -> 100
-		     end,
-    Length = length(MsgsAll),
-    get_messages_subset2(MaxOfflineMsgs, Length, MsgsAll).
+webadmin_user(Acc, User, Server, R) ->
+    Acc ++ [make_command(get_offline_count, R, [{<<"user">>, User}, {<<"host">>, Server}],
+                         [{result_links, [{value, arg_host, 4, <<"user/", User/binary, "/queue/">>}]}]
+                        )].
 
-get_messages_subset2(Max, Length, MsgsAll) when Length =< Max * 2 ->
-    MsgsAll;
-get_messages_subset2(Max, Length, MsgsAll) ->
-    FirstN = Max,
-    {MsgsFirstN, Msgs2} = lists:split(FirstN, MsgsAll),
-    MsgsLastN = lists:nthtail(Length - FirstN - FirstN,
-			      Msgs2),
-    NoJID = jid:make(<<"...">>, <<"...">>),
-    Seq = <<"0">>,
-    IntermediateMsg = #xmlel{name = <<"...">>, attrs = [],
-			     children = []},
-    MsgsFirstN ++ [{Seq, NoJID, NoJID, IntermediateMsg}] ++ MsgsLastN.
-
-webadmin_user(Acc, User, Server, Lang) ->
-    QueueLen = count_offline_messages(jid:nodeprep(User),
-				jid:nameprep(Server)),
-    FQueueLen = ?C(integer_to_binary(QueueLen)),
-    FQueueView = ?AC(<<"queue/">>,
-		     ?T("View Queue")),
-    Acc ++
-        [?XCT(<<"h3">>, ?T("Offline Messages:")),
-         FQueueLen,
-         ?C(<<"  |   ">>),
-         FQueueView,
-         ?C(<<" | ">>),
-         ?INPUTTD(<<"submit">>, <<"removealloffline">>,
-                  ?T("Remove All Offline Messages"))].
+%%%
+%%%
+%%%
 
 -spec delete_all_msgs(binary(), binary()) -> {atomic, any()}.
 delete_all_msgs(User, Server) ->
@@ -1266,10 +1184,8 @@ mod_doc() ->
               "again. Thus it is very similar to how email works. A user "
               "is considered offline if no session presence priority > 0 "
               "are currently open."), "",
-           ?T("NOTE: 'ejabberdctl' has a command to "
-              "delete expired messages (see chapter "
-              "https://docs.ejabberd.im/admin/guide/managing"
-              "[Managing an ejabberd server] in online documentation.")],
+           ?T("The _`delete_expired_messages`_ API allows to delete expired messages, "
+              "and _`delete_old_messages`_ API deletes older ones.")],
       opts =>
           [{access_max_user_messages,
             #{value => ?T("AccessName"),
@@ -1278,16 +1194,16 @@ mod_doc() ->
                      "enforced to limit the maximum number of offline "
                      "messages that a user can have (quota). When a user "
                      "has too many offline messages, any new messages that "
-                     "they receive are discarded, and a <resource-constraint/> "
+                     "they receive are discarded, and a '<resource-constraint/>' "
                      "error is returned to the sender. The default value is "
                      "'max_user_offline_messages'.")}},
            {store_empty_body,
             #{value => "true | false | unless_chat_state",
               desc =>
-                  ?T("Whether or not to store messages that lack a <body/> "
+                  ?T("Whether or not to store messages that lack a '<body/>' "
                      "element. The default value is 'unless_chat_state', "
                      "which tells ejabberd to store messages even if they "
-                     "lack the <body/> element, unless they only contain a "
+                     "lack the '<body/>' element, unless they only contain a "
                      "chat state notification (as defined in "
                      "https://xmpp.org/extensions/xep-0085.html"
                      "[XEP-0085: Chat State Notifications].")}},
@@ -1299,8 +1215,8 @@ mod_doc() ->
            {use_mam_for_storage,
             #{value => "true | false",
               desc =>
-                  ?T("This is an experimental option. Enabling this option, "
-                     "'mod_offline' uses the 'mod_mam' archive table instead "
+                  ?T("This is an experimental option. By enabling the option, "
+                     "this module uses the 'archive' table from _`mod_mam`_ instead "
                      "of its own spool table to retrieve the messages received "
                      "when the user was offline. This allows client "
                      "developers to slowly drop XEP-0160 and rely on XEP-0313 "
@@ -1314,7 +1230,7 @@ mod_doc() ->
            {bounce_groupchat,
             #{value => "true | false",
               desc =>
-                  ?T("This option is use the disable an optimisation that "
+                  ?T("This option is use the disable an optimization that "
                      "avoids bouncing error messages when groupchat messages "
                      "could not be stored as offline. It will reduce chat "
                      "room load, without any drawback in standard use cases. "
@@ -1324,7 +1240,7 @@ mod_doc() ->
                      "but the bounce is much more likely to happen in the context "
                      "of MucSub, so it is even more important to have it on "
                      "large MucSub services. The default value is 'false', meaning "
-                     "the optimisation is enabled.")}},
+                     "the optimization is enabled.")}},
            {db_type,
             #{value => "mnesia | sql",
               desc =>

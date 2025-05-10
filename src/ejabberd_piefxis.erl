@@ -5,7 +5,7 @@
 %%% Created : 17 Jul 2008 by Pablo Polvorin <pablo.polvorin@process-one.net>
 %%%
 %%%
-%%% ejabberd, Copyright (C) 2002-2022   ProcessOne
+%%% ejabberd, Copyright (C) 2002-2025   ProcessOne
 %%%
 %%% This program is free software; you can redistribute it and/or
 %%% modify it under the terms of the GNU General Public License as
@@ -32,7 +32,7 @@
 
 -module(ejabberd_piefxis).
 
--protocol({xep, 227, '1.1'}).
+-protocol({xep, 227, '1.1', '2.1.0', "partial", ""}).
 
 -export([import_file/1, export_server/1, export_host/2]).
 

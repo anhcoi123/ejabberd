@@ -1,6 +1,6 @@
 %%%----------------------------------------------------------------------
 %%%
-%%% ejabberd, Copyright (C) 2002-2022   ProcessOne
+%%% ejabberd, Copyright (C) 2002-2025   ProcessOne
 %%%
 %%% This program is free software; you can redistribute it and/or
 %%% modify it under the terms of the GNU General Public License as
@@ -151,6 +151,30 @@ ProcessVars = fun F([], Acc) ->
 			  false ->
 			      F(Tail, Acc)
 		      end;
+	          F([{Type, {Mod, TypeDef}, Value} | Tail], Acc) when
+	              Type == if_type_exported orelse
+		          Type == if_type_not_exported ->
+	              try
+		          {ok, Concrete} = dialyzer_utils:get_core_from_beam(code:which(Mod)),
+		          {ok, Types} = dialyzer_utils:get_record_and_type_info(Concrete),
+		          maps:get(TypeDef, Types, undefined)
+	              of
+		          undefined when Type == if_type_not_exported ->
+		              F(Tail, ProcessSingleVar(F, Value, Acc));
+		          undefined ->
+		              F(Tail, Acc);
+		          _ when Type == if_type_exported ->
+		              F(Tail, ProcessSingleVar(F, Value, Acc));
+		          _ ->
+		              F(Tail, Acc)
+	              catch _:_ ->
+		          if
+		              Type == if_type_not_exported ->
+			          F(Tail, ProcessSingleVar(F, Value, Acc));
+		              true ->
+			          F(Tail, Acc)
+		          end
+	              end;
 		  F([Other1 | Tail1], Acc) ->
 		      F(Tail1, [F(Other1, []) | Acc]);
 		  F(Val, Acc) when is_tuple(Val) ->
@@ -195,19 +219,34 @@ AppendList2 = fun(Append) ->
 		      end
 	      end,
 
-Rebar3DepsFilter =
+% Convert our rich deps syntax to rebar2 format:
+% https://github.com/rebar/rebar/wiki/Dependency-management
+Rebar2DepsFilter =
 fun(DepsList, GitOnlyDeps) ->
-	lists:map(fun({DepName, _, {git, _, {tag, Version}}} = Dep) ->
-			  case lists:member(DepName, GitOnlyDeps) of
-			      true ->
-				  Dep;
-			      _ ->
-				  {DepName, Version}
-                          end;
-		     (Dep) ->
-			  Dep
+	lists:map(fun({DepName, _HexVersion, Source}) ->
+	              {DepName, ".*", Source}
 		  end, DepsList)
 end,
+
+% Convert our rich deps syntax to rebar3 version definition format:
+% https://rebar3.org/docs/configuration/dependencies/#dependency-version-handling
+% https://hexdocs.pm/elixir/Version.html
+Rebar3DepsFilter =
+fun(DepsList, GitOnlyDeps) ->
+	lists:map(fun({DepName, HexVersion, {git, _, {tag, GitVersion}} = Source}) ->
+			  case {lists:member(DepName, GitOnlyDeps), HexVersion == ".*"} of
+                              {true, _} ->
+                                  {DepName, ".*", Source};
+                              {false, true} ->
+                                  {DepName, GitVersion};
+                              {false, false} ->
+                                  {DepName, HexVersion}
+                          end;
+		     ({DepName, _HexVersion, Source}) ->
+	              {DepName, ".*", Source}
+		  end, DepsList)
+end,
+
 
 DepAlts = fun("esip") -> ["esip", "p1_sip"];
 	     ("xmpp") -> ["xmpp", "p1_xmpp"];
@@ -232,7 +271,8 @@ LibDir = fun(Name, Suffix) ->
 GlobalDepsFilter =
 fun(Deps) ->
 	DepNames = lists:map(fun({DepName, _, _}) -> DepName;
-				({DepName, _}) -> DepName
+				({DepName, _}) -> DepName;
+				(DepName) -> DepName
 			     end, Deps),
 	lists:filtermap(fun(Dep) ->
 				case LibDir(atom_to_list(Dep), "") of
@@ -352,14 +392,11 @@ VarsApps = case file:consult(filename:join([filename:dirname(SCRIPT),"vars.confi
 
 ProcessRelx = fun(Relx, Deps) ->
     {value, {release, NameVersion, DefaultApps}, RelxTail} = lists:keytake(release, 1, Relx),
-    ProfileApps = case os:getenv("REBAR_PROFILE") of
-                  "dev" -> [observer, runtime_tools, wx, debugger];
-                      _ -> []
-              end,
     DepApps = lists:map(fun({DepName, _, _}) -> DepName;
-                        ({DepName, _}) -> DepName
+                        ({DepName, _}) -> DepName;
+                        (DepName) -> DepName
                 end, Deps),
-    [{release, NameVersion, DefaultApps ++ VarsApps ++ ProfileApps ++ DepApps} | RelxTail]
+    [{release, NameVersion, DefaultApps ++ VarsApps ++ DepApps} | RelxTail]
     end,
 
 GithubConfig = case {os:getenv("GITHUB_ACTIONS"), os:getenv("GITHUB_TOKEN")} of
@@ -380,6 +417,8 @@ GithubConfig = case {os:getenv("GITHUB_ACTIONS"), os:getenv("GITHUB_TOKEN")} of
 end,
 
 Rules = [
+	 {[plugins], IsRebar3,
+	  AppendList([{pc, "~> 1.15.0"}]), []},
 	 {[provider_hooks], IsRebar3,
 	  AppendList([{pre, [
 			     {compile, {asn, compile}},
@@ -401,6 +440,8 @@ Rules = [
 	  ProcessRelx, [], []},
 	 {[deps], [floating_deps], true,
 	  ProcessFloatingDeps, [], []},
+	 {[deps], [gitonly_deps], (not IsRebar3),
+	  Rebar2DepsFilter, [], []},
 	 {[deps], [gitonly_deps], IsRebar3,
 	  Rebar3DepsFilter, [], []},
 	 {[deps], SystemDeps /= false,

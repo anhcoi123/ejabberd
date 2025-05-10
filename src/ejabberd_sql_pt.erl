@@ -5,7 +5,7 @@
 %%% Created : 20 Jan 2016 by Alexey Shchepin <alexey@process-one.net>
 %%%
 %%%
-%%% ejabberd, Copyright (C) 2002-2022   ProcessOne
+%%% ejabberd, Copyright (C) 2002-2025   ProcessOne
 %%%
 %%% This program is free software; you can redistribute it and/or
 %%% modify it under the terms of the GNU General Public License as
@@ -42,7 +42,8 @@
                 used_vars = [],
                 use_new_schema,
                 need_timestamp_pass = false,
-                need_array_pass = false}).
+                need_array_pass = false,
+                has_list = false}).
 
 -define(QUERY_RECORD, "sql_query").
 
@@ -268,9 +269,12 @@ parse1([$@, $( | S], Acc, State) ->
     Convert =
         case Type of
             integer ->
-                erl_syntax:application(
-                  erl_syntax:atom(binary_to_integer),
-                  [EVar]);
+                erl_syntax:if_expr([
+                    erl_syntax:clause(
+                        [erl_syntax:application(erl_syntax:atom(is_binary), [EVar])],
+                        [erl_syntax:application(erl_syntax:atom(binary_to_integer), [EVar])]),
+                    erl_syntax:clause([erl_syntax:atom(true)], [EVar])
+                    ]);
             string ->
                 EVar;
             timestamp ->
@@ -339,6 +343,7 @@ parse1([$%, $( | S], Acc, State) ->
                      erl_syntax:variable(Name)]),
                 State2#state{'query' = [[{var, Var, Type}] | State2#state.'query'],
                              need_array_pass = true,
+                             has_list = true,
                              args = [[Convert, ConvertArr] | State2#state.args],
                              params = [Var | State2#state.params],
                              param_pos = State2#state.param_pos + 1,
@@ -467,6 +472,7 @@ make_sql_query(State, Type) ->
     Hash = erlang:phash2(State#state{loc = undefined, use_new_schema = true}),
     SHash = <<"Q", (integer_to_binary(Hash))/binary>>,
     Query = pack_query(State#state.'query'),
+    Flags = case State#state.has_list of true -> 1; _ -> 0 end,
     EQuery =
         lists:flatmap(
           fun({str, S}) ->
@@ -515,6 +521,9 @@ make_sql_query(State, Type) ->
              none,
              [erl_syntax:tuple(State#state.res)]
             )])),
+      erl_syntax:record_field(
+          erl_syntax:atom(flags),
+          erl_syntax:abstract(Flags)),
       erl_syntax:record_field(
        erl_syntax:atom(loc),
         erl_syntax:abstract({get(?MOD), State#state.loc}))
@@ -567,7 +576,6 @@ parse_upsert_field1([$= | S], Acc, ParamPos, Loc) ->
 parse_upsert_field1([C | S], Acc, ParamPos, Loc) ->
     parse_upsert_field1(S, [C | Acc], ParamPos, Loc).
 
-
 make_sql_upsert(Table, ParseRes, Pos) ->
     check_upsert(ParseRes, Pos),
     erl_syntax:fun_expr(
@@ -586,6 +594,11 @@ make_sql_upsert(Table, ParseRes, Pos) ->
                  erl_syntax:operator('>='),
                  erl_syntax:integer(90100))],
              [make_sql_upsert_pgsql901(Table, ParseRes),
+              erl_syntax:atom(ok)]),
+         erl_syntax:clause(
+             [erl_syntax:atom(mysql), erl_syntax:tuple([erl_syntax:underscore(), erl_syntax:underscore(), erl_syntax:integer(1)])],
+             [],
+             [make_sql_upsert_mysql_select(Table, ParseRes),
               erl_syntax:atom(ok)]),
          erl_syntax:clause(
              [erl_syntax:atom(mysql), erl_syntax:underscore()],
@@ -681,6 +694,66 @@ make_sql_upsert_insert(Table, ParseRes) ->
            #state{'query' = [{str, ");"}]}
           ]),
     State.
+
+make_sql_upsert_select(Table, ParseRes) ->
+    {Fields0, Where0} =
+    lists:foldl(
+        fun({Field, key, ST}, {Fie, Whe}) ->
+               {Fie, [ST#state{
+                   'query' = [{str, Field}, {str, "="}] ++ ST#state.'query'}] ++ Whe};
+           ({Field, {true}, ST}, {Fie, Whe}) ->
+               {[ST#state{
+                   'query' = [{str, Field}, {str, "="}] ++ ST#state.'query'}] ++ Fie, Whe};
+           (_, Acc) ->
+               Acc
+        end, {[], []}, ParseRes),
+    Fields = join_states(Fields0, " AND "),
+    Where = join_states(Where0, " AND "),
+    State =
+    concat_states(
+        [#state{'query' = [{str, "SELECT "}],
+                res_vars = [erl_syntax:variable("__VSel")],
+                res = [erl_syntax:application(
+                    erl_syntax:atom(ejabberd_sql),
+                    erl_syntax:atom(to_bool),
+                    [erl_syntax:variable("__VSel")])]},
+         Fields,
+         #state{'query' = [{str, " FROM "}, {str, Table}, {str, " WHERE "}]},
+         Where
+        ]),
+    State.
+
+make_sql_upsert_mysql_select(Table, ParseRes) ->
+    Select = make_sql_query(make_sql_upsert_select(Table, ParseRes)),
+    Insert = make_sql_query(make_sql_upsert_insert(Table, ParseRes)),
+    Update = make_sql_query(make_sql_upsert_update(Table, ParseRes)),
+    erl_syntax:case_expr(
+        erl_syntax:application(
+            erl_syntax:atom(ejabberd_sql),
+            erl_syntax:atom(sql_query_t),
+            [Select]),
+        [erl_syntax:clause(
+            [erl_syntax:tuple([erl_syntax:atom(selected), erl_syntax:list([])])],
+            none,
+            [erl_syntax:application(
+                erl_syntax:atom(ejabberd_sql),
+                erl_syntax:atom(sql_query_t),
+                [Insert])]),
+         erl_syntax:clause(
+             [erl_syntax:abstract({selected, [{true}]})],
+             [],
+             [erl_syntax:atom(ok)]),
+         erl_syntax:clause(
+             [erl_syntax:tuple([erl_syntax:atom(selected), erl_syntax:underscore()])],
+             none,
+             [erl_syntax:application(
+                 erl_syntax:atom(ejabberd_sql),
+                 erl_syntax:atom(sql_query_t),
+                 [Update])]),
+         erl_syntax:clause(
+             [erl_syntax:variable("__SelectRes")],
+             none,
+             [erl_syntax:variable("__SelectRes")])]).
 
 make_sql_upsert_mysql(Table, ParseRes) ->
     Vals =

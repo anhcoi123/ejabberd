@@ -1,5 +1,5 @@
 --
--- ejabberd, Copyright (C) 2002-2022   ProcessOne
+-- ejabberd, Copyright (C) 2002-2025   ProcessOne
 --
 -- This program is free software; you can redistribute it and/or
 -- modify it under the terms of the GNU General Public License as
@@ -18,13 +18,14 @@
 
 CREATE TABLE users (
     username varchar(191) NOT NULL,
+    type smallint NOT NULL,
     server_host varchar(191) NOT NULL,
     password text NOT NULL,
     serverkey varchar(128) NOT NULL DEFAULT '',
     salt varchar(128) NOT NULL DEFAULT '',
     iterationcount integer NOT NULL DEFAULT 0,
     created_at timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    PRIMARY KEY (server_host(191), username)
+    PRIMARY KEY (server_host(191), username, type)
 ) ENGINE=InnoDB CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 
 -- Add support for SCRAM auth to a database created before ejabberd 16.03:
@@ -56,7 +57,6 @@ CREATE TABLE rosterusers (
 ) ENGINE=InnoDB CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 
 CREATE UNIQUE INDEX i_rosteru_sh_user_jid ON rosterusers(server_host(191), username(75), jid(75));
-CREATE INDEX i_rosteru_sh_username ON rosterusers(server_host(191), username);
 CREATE INDEX i_rosteru_sh_jid ON rosterusers(server_host(191), jid);
 
 CREATE TABLE rostergroups (
@@ -86,8 +86,7 @@ CREATE TABLE sr_user (
     PRIMARY KEY (server_host(191), jid, grp)
 ) ENGINE=InnoDB CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 
-CREATE UNIQUE INDEX i_sr_user_sh_jid_group ON sr_user(server_host(191), jid, grp);
-CREATE INDEX i_sr_user_sh_jid ON sr_user(server_host(191), jid);
+CREATE UNIQUE INDEX i_sr_user_sh_jid_grp ON sr_user(server_host(191), jid, grp);
 CREATE INDEX i_sr_user_sh_grp ON sr_user(server_host(191), grp);
 
 CREATE TABLE spool (
@@ -112,6 +111,7 @@ CREATE TABLE archive (
     id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT UNIQUE,
     kind varchar(10),
     nick varchar(191),
+    origin_id varchar(191),
     created_at timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP
 ) ENGINE=InnoDB CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 
@@ -120,6 +120,12 @@ CREATE INDEX i_archive_sh_username_timestamp USING BTREE ON archive(server_host(
 CREATE INDEX i_archive_sh_username_peer USING BTREE ON archive(server_host(191), username(191), peer(191));
 CREATE INDEX i_archive_sh_username_bare_peer USING BTREE ON archive(server_host(191), username(191), bare_peer(191));
 CREATE INDEX i_archive_sh_timestamp USING BTREE ON archive(server_host(191), timestamp);
+CREATE INDEX i_archive_sh_username_origin_id USING BTREE ON archive(server_host(191), username(191), origin_id(191));
+
+-- To update 'archive' from ejabberd <= 23.10:
+-- ALTER TABLE archive ADD COLUMN origin_id varchar(191) NOT NULL DEFAULT '';
+-- ALTER TABLE archive ALTER COLUMN origin_id DROP DEFAULT;
+-- CREATE INDEX i_archive_sh_username_origin_id USING BTREE ON archive(server_host(191), username(191), origin_id(191));
 
 CREATE TABLE archive_prefs (
     username varchar(191) NOT NULL,
@@ -195,7 +201,6 @@ CREATE TABLE privacy_list (
     created_at timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP
 ) ENGINE=InnoDB CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 
-CREATE INDEX i_privacy_list_sh_username  USING BTREE ON privacy_list(server_host(191), username);
 CREATE UNIQUE INDEX i_privacy_list_sh_username_name USING BTREE ON privacy_list (server_host(191), username(75), name(75));
 
 CREATE TABLE privacy_list_data (
@@ -218,11 +223,10 @@ CREATE TABLE private_storage (
     server_host varchar(191) NOT NULL,
     namespace varchar(191) NOT NULL,
     data text NOT NULL,
-    created_at timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    PRIMARY KEY (server_host(191), username, namespace)
+    created_at timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP
 ) ENGINE=InnoDB CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 
-CREATE INDEX i_private_storage_sh_username USING BTREE ON private_storage(server_host(191), username);
+CREATE UNIQUE INDEX i_private_storage_sh_sername_namespace USING BTREE ON private_storage(server_host(191), username, namespace);
 
 -- Not tested in mysql
 CREATE TABLE roster_version (
@@ -335,7 +339,6 @@ CREATE TABLE muc_online_users (
 ) ENGINE=InnoDB CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 
 CREATE UNIQUE INDEX i_muc_online_users USING BTREE ON muc_online_users(username(75), server(75), resource(75), name(75), host(75));
-CREATE INDEX i_muc_online_users_us USING BTREE ON muc_online_users(username(75), server(75));
 
 CREATE TABLE muc_room_subscribers (
    room varchar(191) NOT NULL,
@@ -405,7 +408,6 @@ CREATE TABLE route (
 ) ENGINE=InnoDB CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 
 CREATE UNIQUE INDEX i_route ON route(domain(75), server_host(75), node(75), pid(75));
-CREATE INDEX i_route_domain ON route(domain(75));
 
 CREATE TABLE bosh (
     sid text NOT NULL,
@@ -438,6 +440,7 @@ CREATE TABLE push_session (
 ) ENGINE=InnoDB CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 
 CREATE UNIQUE INDEX i_push_session_susn ON push_session (server_host(191), username(191), service(191), node(191));
+CREATE INDEX i_push_session_sh_username_timestamp ON push_session (server_host, username(191), timestamp);
 
 CREATE TABLE mix_channel (
     channel text NOT NULL,
@@ -465,7 +468,6 @@ CREATE TABLE mix_participant (
 ) ENGINE=InnoDB CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 
 CREATE UNIQUE INDEX i_mix_participant ON mix_participant (channel(191), service(191), username(191), domain(191));
-CREATE INDEX i_mix_participant_chan_serv ON mix_participant (channel(191), service(191));
 
 CREATE TABLE mix_subscription (
     channel text NOT NULL,
@@ -477,9 +479,7 @@ CREATE TABLE mix_subscription (
 ) ENGINE=InnoDB CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 
 CREATE UNIQUE INDEX i_mix_subscription ON mix_subscription (channel(153), service(153), username(153), domain(153), node(153));
-CREATE INDEX i_mix_subscription_chan_serv_ud ON mix_subscription (channel(191), service(191), username(191), domain(191));
 CREATE INDEX i_mix_subscription_chan_serv_node ON mix_subscription (channel(191), service(191), node(191));
-CREATE INDEX i_mix_subscription_chan_serv ON mix_subscription (channel(191), service(191));
 
 CREATE TABLE mix_pam (
     username text NOT NULL,
@@ -491,7 +491,6 @@ CREATE TABLE mix_pam (
 ) ENGINE=InnoDB CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 
 CREATE UNIQUE INDEX i_mix_pam ON mix_pam (username(191), server_host(191), channel(191), service(191));
-CREATE INDEX i_mix_pam_us ON mix_pam (username(191), server_host(191));
 
 CREATE TABLE mqtt_pub (
     username varchar(191) NOT NULL,

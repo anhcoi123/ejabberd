@@ -4,7 +4,7 @@
 %%% Created : 13 Apr 2016 by Evgeny Khramtsov <ekhramtsov@process-one.net>
 %%%
 %%%
-%%% ejabberd, Copyright (C) 2002-2022   ProcessOne
+%%% ejabberd, Copyright (C) 2002-2025   ProcessOne
 %%%
 %%% This program is free software; you can redistribute it and/or
 %%% modify it under the terms of the GNU General Public License as
@@ -57,6 +57,10 @@ init(Host, Opts) ->
 	    transient, 5000, worker, [?MODULE]},
     case supervisor:start_child(ejabberd_backend_sup, Spec) of
 	{ok, _Pid} -> ok;
+        %% Maybe started for a vhost which only wanted mnesia for ram
+        %% and this vhost wants mnesia for persitent storage too
+        {error, {already_started, _Pid}} ->
+            init([Host, Opts]);
 	Err -> Err
     end.
 
@@ -82,13 +86,19 @@ forget_room(_LServer, Host, Name) ->
 	end,
     mnesia:transaction(F).
 
-can_use_nick(_LServer, Host, JID, Nick) ->
+can_use_nick(_LServer, ServiceOrRoom, JID, Nick) ->
     {LUser, LServer, _} = jid:tolower(JID),
     LUS = {LUser, LServer},
+    MatchSpec = case (jid:decode(ServiceOrRoom))#jid.lserver of
+        ServiceOrRoom -> [{'==', {element, 2, '$1'}, ServiceOrRoom}];
+        Service -> [{'orelse',
+                    {'==', {element, 2, '$1'}, Service},
+                    {'==', {element, 2, '$1'}, ServiceOrRoom} }]
+                end,
     case catch mnesia:dirty_select(muc_registered,
 				   [{#muc_registered{us_host = '$1',
 						     nick = Nick, _ = '_'},
-				     [{'==', {element, 2, '$1'}, Host}],
+				     MatchSpec,
 				     ['$_']}])
 	of
       {'EXIT', _Reason} -> true;
@@ -110,31 +120,46 @@ get_nick(_LServer, Host, From) ->
 	[#muc_registered{nick = Nick}] -> Nick
     end.
 
-set_nick(_LServer, Host, From, Nick) ->
+set_nick(_LServer, ServiceOrRoom, From, Nick) ->
     {LUser, LServer, _} = jid:tolower(From),
     LUS = {LUser, LServer},
     F = fun () ->
 		case Nick of
 		    <<"">> ->
-			mnesia:delete({muc_registered, {LUS, Host}}),
+			mnesia:delete({muc_registered, {LUS, ServiceOrRoom}}),
 			ok;
 		    _ ->
+                        Service = (jid:decode(ServiceOrRoom))#jid.lserver,
+                        MatchSpec = case (ServiceOrRoom == Service) of
+                            true -> [{'==', {element, 2, '$1'}, ServiceOrRoom}];
+                            false -> [{'orelse',
+                                        {'==', {element, 2, '$1'}, Service},
+                                        {'==', {element, 2, '$1'}, ServiceOrRoom} }]
+                                    end,
 			Allow = case mnesia:select(
 				       muc_registered,
-				       [{#muc_registered{us_host =
-							     '$1',
-							 nick = Nick,
-							 _ = '_'},
-					 [{'==', {element, 2, '$1'},
-					   Host}],
+				       [{#muc_registered{us_host = '$1', nick = Nick, _ = '_'},
+					 MatchSpec,
 					 ['$_']}]) of
+				    [] when (ServiceOrRoom == Service) ->
+			                NickRegistrations = mnesia:select(
+				            muc_registered,
+				            [{#muc_registered{us_host = '$1', nick = Nick, _ = '_'},
+					        [],
+					        ['$_']}]),
+                                        not lists:any(fun({_, {_NRUS, NRServiceOrRoom}, _Nick}) ->
+                                                              Service == (jid:decode(NRServiceOrRoom))#jid.lserver end,
+                                                      NickRegistrations);
 				    [] -> true;
+				    [#muc_registered{us_host = {_U, Host}}]
+                                      when (Host == Service) and (ServiceOrRoom /= Service) ->
+					false;
 				    [#muc_registered{us_host = {U, _Host}}] ->
 					U == LUS
 				end,
 			if Allow ->
 				mnesia:write(#muc_registered{
-						us_host = {LUS, Host},
+						us_host = {LUS, ServiceOrRoom},
 						nick = Nick}),
 				ok;
 			   true ->
@@ -401,6 +426,15 @@ need_transform({muc_room, {N, H}, _})
   when is_list(N) orelse is_list(H) ->
     ?INFO_MSG("Mnesia table 'muc_room' will be converted to binary", []),
     true;
+need_transform({muc_room, {_N, _H}, Opts}) ->
+    case lists:keymember(allow_private_messages, 1, Opts) of
+        true ->
+            ?INFO_MSG("Mnesia table 'muc_room' will be converted to allowpm", []),
+            true;
+        false ->
+            false
+    end;
+
 need_transform({muc_registered, {{U, S}, H}, Nick})
   when is_list(U) orelse is_list(S) orelse is_list(H) orelse is_list(Nick) ->
     ?INFO_MSG("Mnesia table 'muc_registered' will be converted to binary", []),
@@ -408,9 +442,22 @@ need_transform({muc_registered, {{U, S}, H}, Nick})
 need_transform(_) ->
     false.
 
-transform(#muc_room{name_host = {N, H}, opts = Opts} = R) ->
+transform({muc_room, {N, H}, Opts} = R)
+  when is_list(N) orelse is_list(H) ->
     R#muc_room{name_host = {iolist_to_binary(N), iolist_to_binary(H)},
 	       opts = mod_muc:opts_to_binary(Opts)};
+transform(#muc_room{opts = Opts} = R) ->
+    Opts2 = case lists:keyfind(allow_private_messages, 1, Opts) of
+        {_, Value} when is_boolean(Value) ->
+            Value2 = case Value of
+                         true -> anyone;
+                         false -> none
+                     end,
+            lists:keyreplace(allow_private_messages, 1, Opts, {allowpm, Value2});
+        _ ->
+            Opts
+    end,
+    R#muc_room{opts = Opts2};
 transform(#muc_registered{us_host = {{U, S}, H}, nick = Nick} = R) ->
     R#muc_registered{us_host = {{iolist_to_binary(U), iolist_to_binary(S)},
 				iolist_to_binary(H)},

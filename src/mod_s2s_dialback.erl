@@ -2,7 +2,7 @@
 %%% Created : 16 Dec 2016 by Evgeny Khramtsov <ekhramtsov@process-one.net>
 %%%
 %%%
-%%% ejabberd, Copyright (C) 2002-2022   ProcessOne
+%%% ejabberd, Copyright (C) 2002-2025   ProcessOne
 %%%
 %%% This program is free software; you can redistribute it and/or
 %%% modify it under the terms of the GNU General Public License as
@@ -21,8 +21,8 @@
 %%%-------------------------------------------------------------------
 -module(mod_s2s_dialback).
 -behaviour(gen_mod).
--protocol({xep, 220, '1.1.1'}).
--protocol({xep, 185, '1.0'}).
+-protocol({xep, 220, '1.1.1', '17.03', "complete", ""}).
+-protocol({xep, 185, '1.0', '17.03', "complete", ""}).
 
 %% gen_mod API
 -export([start/2, stop/1, reload/3, depends/2, mod_opt_type/1, mod_options/1]).
@@ -40,49 +40,21 @@
 %%%===================================================================
 %%% API
 %%%===================================================================
-start(Host, _Opts) ->
-    ejabberd_hooks:add(s2s_out_init, Host, ?MODULE, s2s_out_init, 50),
-    ejabberd_hooks:add(s2s_out_closed, Host, ?MODULE, s2s_out_closed, 50),
-    ejabberd_hooks:add(s2s_in_pre_auth_features, Host, ?MODULE,
-		       s2s_in_features, 50),
-    ejabberd_hooks:add(s2s_in_post_auth_features, Host, ?MODULE,
-		       s2s_in_features, 50),
-    ejabberd_hooks:add(s2s_in_handle_recv, Host, ?MODULE,
-		       s2s_in_recv, 50),
-    ejabberd_hooks:add(s2s_in_unauthenticated_packet, Host, ?MODULE,
-		       s2s_in_packet, 50),
-    ejabberd_hooks:add(s2s_in_authenticated_packet, Host, ?MODULE,
-		       s2s_in_packet, 50),
-    ejabberd_hooks:add(s2s_out_packet, Host, ?MODULE,
-		       s2s_out_packet, 50),
-    ejabberd_hooks:add(s2s_out_downgraded, Host, ?MODULE,
-		       s2s_out_downgraded, 50),
-    ejabberd_hooks:add(s2s_out_auth_result, Host, ?MODULE,
-		       s2s_out_auth_result, 50),
-    ejabberd_hooks:add(s2s_out_tls_verify, Host, ?MODULE,
-		       s2s_out_tls_verify, 50).
+start(_Host, _Opts) ->
+    {ok, [{hook, s2s_out_init, s2s_out_init, 50},
+          {hook, s2s_out_closed, s2s_out_closed, 50},
+          {hook, s2s_in_pre_auth_features, s2s_in_features, 50},
+          {hook, s2s_in_post_auth_features, s2s_in_features, 50},
+          {hook, s2s_in_handle_recv, s2s_in_recv, 50},
+          {hook, s2s_in_unauthenticated_packet, s2s_in_packet, 50},
+          {hook, s2s_in_authenticated_packet, s2s_in_packet, 50},
+          {hook, s2s_out_packet, s2s_out_packet, 50},
+          {hook, s2s_out_downgraded, s2s_out_downgraded, 50},
+          {hook, s2s_out_auth_result, s2s_out_auth_result, 50},
+          {hook, s2s_out_tls_verify, s2s_out_tls_verify, 50}]}.
 
-stop(Host) ->
-    ejabberd_hooks:delete(s2s_out_init, Host, ?MODULE, s2s_out_init, 50),
-    ejabberd_hooks:delete(s2s_out_closed, Host, ?MODULE, s2s_out_closed, 50),
-    ejabberd_hooks:delete(s2s_in_pre_auth_features, Host, ?MODULE,
-			  s2s_in_features, 50),
-    ejabberd_hooks:delete(s2s_in_post_auth_features, Host, ?MODULE,
-			  s2s_in_features, 50),
-    ejabberd_hooks:delete(s2s_in_handle_recv, Host, ?MODULE,
-			  s2s_in_recv, 50),
-    ejabberd_hooks:delete(s2s_in_unauthenticated_packet, Host, ?MODULE,
-			  s2s_in_packet, 50),
-    ejabberd_hooks:delete(s2s_in_authenticated_packet, Host, ?MODULE,
-			  s2s_in_packet, 50),
-    ejabberd_hooks:delete(s2s_out_packet, Host, ?MODULE,
-			  s2s_out_packet, 50),
-    ejabberd_hooks:delete(s2s_out_downgraded, Host, ?MODULE,
-			  s2s_out_downgraded, 50),
-    ejabberd_hooks:delete(s2s_out_auth_result, Host, ?MODULE,
-			  s2s_out_auth_result, 50),
-    ejabberd_hooks:delete(s2s_out_tls_verify, Host, ?MODULE,
-			  s2s_out_tls_verify, 50).
+stop(_Host) ->
+    ok.
 
 reload(_Host, _NewOpts, _OldOpts) ->
     ok.
@@ -121,14 +93,12 @@ mod_doc() ->
                      "is 'all'.")}}],
       example =>
           ["modules:",
-           "  ...",
            "  mod_s2s_dialback:",
            "    access:",
            "      allow:",
            "        server: legacy.domain.tld",
            "        server: invalid-cert.example.org",
-           "      deny: all",
-           "  ..."]}.
+           "      deny: all"]}.
 
 s2s_in_features(Acc, _) ->
     [#db_feature{errors = true}|Acc].

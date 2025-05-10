@@ -5,7 +5,7 @@
 %%% Created : 15 Jul 2017 by Holger Weiss <holger@zedat.fu-berlin.de>
 %%%
 %%%
-%%% ejabberd, Copyright (C) 2017-2022 ProcessOne
+%%% ejabberd, Copyright (C) 2017-2025 ProcessOne
 %%%
 %%% This program is free software; you can redistribute it and/or
 %%% modify it under the terms of the GNU General Public License as
@@ -25,7 +25,7 @@
 
 -module(mod_push).
 -author('holger@zedat.fu-berlin.de').
--protocol({xep, 357, '0.2'}).
+-protocol({xep, 357, '0.2', '17.08', "complete", ""}).
 
 -behaviour(gen_mod).
 
@@ -91,25 +91,27 @@
 %%--------------------------------------------------------------------
 %% gen_mod callbacks.
 %%--------------------------------------------------------------------
--spec start(binary(), gen_mod:opts()) -> ok.
+-spec start(binary(), gen_mod:opts()) -> {ok, [gen_mod:registration()]}.
 start(Host, Opts) ->
     Mod = gen_mod:db_mod(Opts, ?MODULE),
     Mod:init(Host, Opts),
     init_cache(Mod, Host, Opts),
-    register_iq_handlers(Host),
-    register_hooks(Host),
-    ejabberd_commands:register_commands(?MODULE, get_commands_spec()).
+    {ok, [{commands, get_commands_spec()},
+          {iq_handler, ejabberd_sm,  ?NS_PUSH_0, process_iq},
+          {hook, disco_sm_features, disco_sm_features, 50},
+          {hook, c2s_session_pending, c2s_session_pending, 50},
+          {hook, c2s_copy_session, c2s_copy_session, 50},
+          {hook, c2s_session_resumed, c2s_session_resumed, 50},
+          {hook, c2s_handle_cast, c2s_handle_cast, 50},
+          {hook, c2s_handle_send, c2s_stanza, 50},
+          {hook, store_mam_message, mam_message, 50},
+          {hook, offline_message_hook, offline_message, 55},
+          {hook, remove_user, remove_user, 50}]}.
+
 
 -spec stop(binary()) -> ok.
-stop(Host) ->
-    unregister_hooks(Host),
-    unregister_iq_handlers(Host),
-    case gen_mod:is_loaded_elsewhere(Host, ?MODULE) of
-        false ->
-            ejabberd_commands:unregister_commands(get_commands_spec());
-        true ->
-            ok
-    end.
+stop(_Host) ->
+    ok.
 
 -spec reload(binary(), gen_mod:opts(), gen_mod:opts()) -> ok.
 reload(Host, NewOpts, OldOpts) ->
@@ -128,6 +130,8 @@ depends(_Host, _Opts) ->
     [].
 
 -spec mod_opt_type(atom()) -> econf:validator().
+mod_opt_type(notify_on) ->
+    econf:enum([messages, all]);
 mod_opt_type(include_sender) ->
     econf:bool();
 mod_opt_type(include_body) ->
@@ -147,7 +151,8 @@ mod_opt_type(cache_life_time) ->
 
 -spec mod_options(binary()) -> [{atom(), any()}].
 mod_options(Host) ->
-    [{include_sender, false},
+    [{notify_on, all},
+     {include_sender, false},
      {include_body, <<"New message">>},
      {db_type, ejabberd_config:default_db(Host, ?MODULE)},
      {use_cache, ejabberd_option:use_cache(Host)},
@@ -166,9 +171,19 @@ mod_doc() ->
              "\"app servers\" operated by third-party vendors of "
              "mobile apps. Those app servers will usually trigger "
              "notification delivery to the user's mobile device using "
-             "platform-dependant backend services such as FCM or APNS."),
+             "platform-dependent backend services such as FCM or APNS."),
       opts =>
-          [{include_sender,
+          [{notify_on,
+            #{value => "messages | all",
+              note => "added in 23.10",
+              desc =>
+                  ?T("If this option is set to 'messages', notifications are "
+                     "generated only for actual chat messages with a body text "
+                     "(or some encrypted payload). If it's set to 'all', any "
+                     "kind of XMPP stanza will trigger a notification. If "
+                     "unsure, it's strongly recommended to stick to 'all', "
+                     "which is the default value.")}},
+           {include_sender,
             #{value => "true | false",
               desc =>
                   ?T("If this option is set to 'true', the sender's JID "
@@ -249,51 +264,6 @@ delete_old_sessions(Days) ->
     end.
 
 %%--------------------------------------------------------------------
-%% Register/unregister hooks.
-%%--------------------------------------------------------------------
--spec register_hooks(binary()) -> ok.
-register_hooks(Host) ->
-    ejabberd_hooks:add(disco_sm_features, Host, ?MODULE,
-		       disco_sm_features, 50),
-    ejabberd_hooks:add(c2s_session_pending, Host, ?MODULE,
-		       c2s_session_pending, 50),
-    ejabberd_hooks:add(c2s_copy_session, Host, ?MODULE,
-		       c2s_copy_session, 50),
-    ejabberd_hooks:add(c2s_session_resumed, Host, ?MODULE,
-		       c2s_session_resumed, 50),
-    ejabberd_hooks:add(c2s_handle_cast, Host, ?MODULE,
-		       c2s_handle_cast, 50),
-    ejabberd_hooks:add(c2s_handle_send, Host, ?MODULE,
-		       c2s_stanza, 50),
-    ejabberd_hooks:add(store_mam_message, Host, ?MODULE,
-		       mam_message, 50),
-    ejabberd_hooks:add(offline_message_hook, Host, ?MODULE,
-		       offline_message, 55),
-    ejabberd_hooks:add(remove_user, Host, ?MODULE,
-		       remove_user, 50).
-
--spec unregister_hooks(binary()) -> ok.
-unregister_hooks(Host) ->
-    ejabberd_hooks:delete(disco_sm_features, Host, ?MODULE,
-			  disco_sm_features, 50),
-    ejabberd_hooks:delete(c2s_session_pending, Host, ?MODULE,
-			  c2s_session_pending, 50),
-    ejabberd_hooks:delete(c2s_copy_session, Host, ?MODULE,
-			  c2s_copy_session, 50),
-    ejabberd_hooks:delete(c2s_session_resumed, Host, ?MODULE,
-			  c2s_session_resumed, 50),
-    ejabberd_hooks:delete(c2s_handle_cast, Host, ?MODULE,
-			  c2s_handle_cast, 50),
-    ejabberd_hooks:delete(c2s_handle_send, Host, ?MODULE,
-			  c2s_stanza, 50),
-    ejabberd_hooks:delete(store_mam_message, Host, ?MODULE,
-			  mam_message, 50),
-    ejabberd_hooks:delete(offline_message_hook, Host, ?MODULE,
-			  offline_message, 55),
-    ejabberd_hooks:delete(remove_user, Host, ?MODULE,
-			  remove_user, 50).
-
-%%--------------------------------------------------------------------
 %% Service discovery.
 %%--------------------------------------------------------------------
 -spec disco_sm_features(empty | {result, [binary()]} | {error, stanza_error()},
@@ -311,15 +281,6 @@ disco_sm_features(Acc, _From, _To, _Node, _Lang) ->
 %%--------------------------------------------------------------------
 %% IQ handlers.
 %%--------------------------------------------------------------------
--spec register_iq_handlers(binary()) -> ok.
-register_iq_handlers(Host) ->
-    gen_iq_handler:add_iq_handler(ejabberd_sm, Host, ?NS_PUSH_0,
-				  ?MODULE, process_iq).
-
--spec unregister_iq_handlers(binary()) -> ok.
-unregister_iq_handlers(Host) ->
-    gen_iq_handler:remove_iq_handler(ejabberd_sm, Host, ?NS_PUSH_0).
-
 -spec process_iq(iq()) -> iq().
 process_iq(#iq{type = get, lang = Lang} = IQ) ->
     Txt = ?T("Value 'get' of 'type' attribute is not allowed"),
@@ -492,7 +453,7 @@ c2s_handle_cast(State, {push_enable, ID}) ->
     {stop, State#{push_enabled => true,
 		  push_session_id => ID}};
 c2s_handle_cast(State, push_disable) ->
-    State1 = maps:remove(push_disable, State),
+    State1 = maps:remove(push_enabled, State),
     State2 = maps:remove(push_session_id, State1),
     {stop, State2};
 c2s_handle_cast(State, _Msg) ->
@@ -557,16 +518,21 @@ notify(LUser, LServer, Clients, Pkt, Dir) ->
 notify(LServer, PushLJID, Node, XData, Pkt0, Dir, HandleResponse) ->
     Pkt = unwrap_message(Pkt0),
     From = jid:make(LServer),
-    Summary = make_summary(LServer, Pkt, Dir),
-    Item = #ps_item{sub_els = [#push_notification{xdata = Summary}]},
-    PubSub = #pubsub{publish = #ps_publish{node = Node, items = [Item]},
-		     publish_options = XData},
-    IQ = #iq{type = set,
-	     from = From,
-	     to = jid:make(PushLJID),
-	     id = p1_rand:get_string(),
-	     sub_els = [PubSub]},
-    ejabberd_router:route_iq(IQ, HandleResponse).
+    case {make_summary(LServer, Pkt, Dir), mod_push_opt:notify_on(LServer)} of
+	{undefined, messages} ->
+	    ?DEBUG("Suppressing notification for stanza without payload", []),
+	    ok;
+	{Summary, _NotifyOn} ->
+	    Item = #ps_item{sub_els = [#push_notification{xdata = Summary}]},
+	    PubSub = #pubsub{publish = #ps_publish{node = Node, items = [Item]},
+			     publish_options = XData},
+	    IQ = #iq{type = set,
+		     from = From,
+		     to = jid:make(PushLJID),
+		     id = p1_rand:get_string(),
+		     sub_els = [PubSub]},
+	    ejabberd_router:route_iq(IQ, HandleResponse)
+    end.
 
 %%--------------------------------------------------------------------
 %% Miscellaneous.
@@ -712,7 +678,7 @@ drop_online_sessions(LUser, LServer, Clients) ->
 
 -spec make_summary(binary(), xmpp_element() | xmlel() | none, direction())
       -> xdata() | undefined.
-make_summary(Host, #message{from = From} = Pkt, recv) ->
+make_summary(Host, #message{from = From0} = Pkt, recv) ->
     case {mod_push_opt:include_sender(Host),
 	  mod_push_opt:include_body(Host)} of
 	{false, false} ->
@@ -732,6 +698,7 @@ make_summary(Host, #message{from = From} = Pkt, recv) ->
 			      end,
 		    Fields2 = case IncludeSender of
 				  true ->
+				      From = jid:remove_resource(From0),
 				      [{'last-message-sender', From} | Fields1];
 				  false ->
 				      Fields1

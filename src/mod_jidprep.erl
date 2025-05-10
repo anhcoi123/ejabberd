@@ -5,7 +5,7 @@
 %%% Created : 11 Sep 2019 by Holger Weiss <holger@zedat.fu-berlin.de>
 %%%
 %%%
-%%% ejabberd, Copyright (C) 2019-2022 ProcessOne
+%%% ejabberd, Copyright (C) 2019-2025 ProcessOne
 %%%
 %%% This program is free software; you can redistribute it and/or
 %%% modify it under the terms of the GNU General Public License as
@@ -25,7 +25,7 @@
 
 -module(mod_jidprep).
 -author('holger@zedat.fu-berlin.de').
--protocol({xep, 328, '0.1'}).
+-protocol({xep, 328, '0.1', '19.09', "complete", ""}).
 
 -behaviour(gen_mod).
 
@@ -46,15 +46,14 @@
 %%--------------------------------------------------------------------
 %% gen_mod callbacks.
 %%--------------------------------------------------------------------
--spec start(binary(), gen_mod:opts()) -> ok.
-start(Host, _Opts) ->
-    register_iq_handlers(Host),
-    register_hooks(Host).
+-spec start(binary(), gen_mod:opts()) -> {ok, [gen_mod:registration()]}.
+start(_Host, _Opts) ->
+    {ok, [{iq_handler, ejabberd_local, ?NS_JIDPREP_0, process_iq},
+          {hook, disco_local_features, disco_local_features, 50}]}.
 
 -spec stop(binary()) -> ok.
-stop(Host) ->
-    unregister_hooks(Host),
-    unregister_iq_handlers(Host).
+stop(_Host) ->
+    ok.
 
 -spec reload(binary(), gen_mod:opts(), gen_mod:opts()) -> ok.
 reload(_Host, _NewOpts, _OldOpts) ->
@@ -89,19 +88,6 @@ mod_doc() ->
                      "service. The default value is 'local'.")}}]}.
 
 %%--------------------------------------------------------------------
-%% Register/unregister hooks.
-%%--------------------------------------------------------------------
--spec register_hooks(binary()) -> ok.
-register_hooks(Host) ->
-    ejabberd_hooks:add(disco_local_features, Host, ?MODULE,
-		       disco_local_features, 50).
-
--spec unregister_hooks(binary()) -> ok.
-unregister_hooks(Host) ->
-    ejabberd_hooks:delete(disco_local_features, Host, ?MODULE,
-			  disco_local_features, 50).
-
-%%--------------------------------------------------------------------
 %% Service discovery.
 %%--------------------------------------------------------------------
 -spec disco_local_features(mod_disco:features_acc(), jid(), jid(), binary(),
@@ -123,15 +109,6 @@ disco_local_features(Acc, _From, _To, _Node, _Lang) ->
 %%--------------------------------------------------------------------
 %% IQ handlers.
 %%--------------------------------------------------------------------
--spec register_iq_handlers(binary()) -> ok.
-register_iq_handlers(Host) ->
-    gen_iq_handler:add_iq_handler(ejabberd_local, Host,
-				  ?NS_JIDPREP_0, ?MODULE, process_iq).
-
--spec unregister_iq_handlers(binary()) -> ok.
-unregister_iq_handlers(Host) ->
-    gen_iq_handler:remove_iq_handler(ejabberd_local, Host, ?NS_JIDPREP_0).
-
 -spec process_iq(iq()) -> iq().
 process_iq(#iq{type = set, lang = Lang} = IQ) ->
     Txt = ?T("Value 'set' of 'type' attribute is not allowed"),

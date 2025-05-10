@@ -5,7 +5,7 @@
 %%% Created : 21 Apr 2014 by Evgeny Khramtsov <ekhramtsov@process-one.net>
 %%%
 %%%
-%%% ejabberd, Copyright (C) 2014-2022   ProcessOne
+%%% ejabberd, Copyright (C) 2014-2025   ProcessOne
 %%%
 %%% This program is free software; you can redistribute it and/or
 %%% modify it under the terms of the GNU General Public License as
@@ -383,14 +383,14 @@ mod_doc() ->
            ?T("NOTE: It is not enough to just load this module. "
               "You should also configure listeners and DNS records "
               "properly. For details see the section about the "
-              "http://../listen/#ejabberd-sip[ejabberd_sip] listen module "
+              "_`listen.md#ejabberd_sip|ejabberd_sip`_ listen module "
               "in the ejabberd Documentation.")],
       opts =>
           [{always_record_route,
             #{value => "true | false",
               desc =>
                   ?T("Always insert \"Record-Route\" header into "
-                     "SIP messages. This approach allows to bypass "
+                     "SIP messages. With this approach it is possible to bypass "
                      "NATs/firewalls a bit more easily. "
                      "The default value is 'true'.")}},
            {flow_timeout_tcp,
@@ -437,7 +437,6 @@ mod_doc() ->
                      "cannot omit \"port\" or \"scheme\").")}}],
       example =>
           ["modules:",
-           "  ...",
            "  mod_sip:",
            "    always_record_route: false",
            "    record_route: \"sip:example.com;lr\"",
@@ -449,7 +448,6 @@ mod_doc() ->
            "    via:",
            "      - tls://sip-tls.example.com:5061",
            "      - tcp://sip-tcp.example.com:5060",
-           "      - udp://sip-udp.example.com:5060",
-           "  ..."]}.
+           "      - udp://sip-udp.example.com:5060"]}.
 
 -endif.

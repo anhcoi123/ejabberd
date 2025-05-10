@@ -5,7 +5,7 @@
 %%% Created : 11 Sep 2014 by Holger Weiss <holger@zedat.fu-berlin.de>
 %%%
 %%%
-%%% ejabberd, Copyright (C) 2014-2022   ProcessOne
+%%% ejabberd, Copyright (C) 2014-2025   ProcessOne
 %%%
 %%% This program is free software; you can redistribute it and/or
 %%% modify it under the terms of the GNU General Public License as
@@ -25,8 +25,8 @@
 
 -module(mod_client_state).
 -author('holger@zedat.fu-berlin.de').
--protocol({xep, 85, '2.1'}).
--protocol({xep, 352, '0.1'}).
+-protocol({xep, 85, '2.1', '2.1.0', "complete", ""}).
+-protocol({xep, 352, '0.1', '14.12', "complete", ""}).
 
 -behaviour(gen_mod).
 

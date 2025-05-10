@@ -5,7 +5,7 @@
 %%% Created :  1 Jan 2003 by Alexey Shchepin <alexey@process-one.net>
 %%%
 %%%
-%%% ejabberd, Copyright (C) 2002-2022   ProcessOne
+%%% ejabberd, Copyright (C) 2002-2025   ProcessOne
 %%%
 %%% This program is free software; you can redistribute it and/or
 %%% modify it under the terms of the GNU General Public License as
@@ -27,8 +27,8 @@
 
 -author('alexey@process-one.net').
 
--protocol({xep, 30, '2.4'}).
--protocol({xep, 157, '1.0'}).
+-protocol({xep, 30, '2.4', '0.1.0', "complete", ""}).
+-protocol({xep, 157, '1.0', '2.1.0', "complete", ""}).
 
 -behaviour(gen_mod).
 
@@ -51,16 +51,6 @@
 -export_type([features_acc/0, items_acc/0]).
 
 start(Host, Opts) ->
-    gen_iq_handler:add_iq_handler(ejabberd_local, Host,
-				  ?NS_DISCO_ITEMS, ?MODULE,
-				  process_local_iq_items),
-    gen_iq_handler:add_iq_handler(ejabberd_local, Host,
-				  ?NS_DISCO_INFO, ?MODULE,
-				  process_local_iq_info),
-    gen_iq_handler:add_iq_handler(ejabberd_sm, Host,
-				  ?NS_DISCO_ITEMS, ?MODULE, process_sm_iq_items),
-    gen_iq_handler:add_iq_handler(ejabberd_sm, Host,
-				  ?NS_DISCO_INFO, ?MODULE, process_sm_iq_info),
     catch ets:new(disco_extra_domains,
 		  [named_table, ordered_set, public,
 		   {heir, erlang:group_leader(), none}]),
@@ -69,45 +59,19 @@ start(Host, Opts) ->
 			  register_extra_domain(Host, Domain)
 		  end,
 		  ExtraDomains),
-    ejabberd_hooks:add(disco_local_items, Host, ?MODULE,
-		       get_local_services, 100),
-    ejabberd_hooks:add(disco_local_features, Host, ?MODULE,
-		       get_local_features, 100),
-    ejabberd_hooks:add(disco_local_identity, Host, ?MODULE,
-		       get_local_identity, 100),
-    ejabberd_hooks:add(disco_sm_items, Host, ?MODULE,
-		       get_sm_items, 100),
-    ejabberd_hooks:add(disco_sm_features, Host, ?MODULE,
-		       get_sm_features, 100),
-    ejabberd_hooks:add(disco_sm_identity, Host, ?MODULE,
-		       get_sm_identity, 100),
-    ejabberd_hooks:add(disco_info, Host, ?MODULE, get_info,
-		       100),
-    ok.
+    {ok, [{iq_handler, ejabberd_local, ?NS_DISCO_ITEMS, process_local_iq_items},
+          {iq_handler, ejabberd_local, ?NS_DISCO_INFO, process_local_iq_info},
+          {iq_handler, ejabberd_sm, ?NS_DISCO_ITEMS, process_sm_iq_items},
+          {iq_handler, ejabberd_sm, ?NS_DISCO_INFO, process_sm_iq_info},
+          {hook, disco_local_items, get_local_services, 100},
+          {hook, disco_local_features, get_local_features, 100},
+          {hook, disco_local_identity, get_local_identity, 100},
+          {hook, disco_sm_items, get_sm_items, 100},
+          {hook, disco_sm_features, get_sm_features, 100},
+          {hook, disco_sm_identity, get_sm_identity, 100},
+          {hook, disco_info, get_info, 100}]}.
 
 stop(Host) ->
-    ejabberd_hooks:delete(disco_sm_identity, Host, ?MODULE,
-			  get_sm_identity, 100),
-    ejabberd_hooks:delete(disco_sm_features, Host, ?MODULE,
-			  get_sm_features, 100),
-    ejabberd_hooks:delete(disco_sm_items, Host, ?MODULE,
-			  get_sm_items, 100),
-    ejabberd_hooks:delete(disco_local_identity, Host,
-			  ?MODULE, get_local_identity, 100),
-    ejabberd_hooks:delete(disco_local_features, Host,
-			  ?MODULE, get_local_features, 100),
-    ejabberd_hooks:delete(disco_local_items, Host, ?MODULE,
-			  get_local_services, 100),
-    ejabberd_hooks:delete(disco_info, Host, ?MODULE,
-			  get_info, 100),
-    gen_iq_handler:remove_iq_handler(ejabberd_local, Host,
-				     ?NS_DISCO_ITEMS),
-    gen_iq_handler:remove_iq_handler(ejabberd_local, Host,
-				     ?NS_DISCO_INFO),
-    gen_iq_handler:remove_iq_handler(ejabberd_sm, Host,
-				     ?NS_DISCO_ITEMS),
-    gen_iq_handler:remove_iq_handler(ejabberd_sm, Host,
-				     ?NS_DISCO_INFO),
     catch ets:match_delete(disco_extra_domains,
 			   {{'_', Host}}),
     ok.

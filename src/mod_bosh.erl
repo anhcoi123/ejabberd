@@ -7,7 +7,7 @@
 %%% Created : 20 Jul 2011 by Evgeniy Khramtsov <ekhramtsov@process-one.net>
 %%%
 %%%
-%%% ejabberd, Copyright (C) 2002-2022   ProcessOne
+%%% ejabberd, Copyright (C) 2002-2025   ProcessOne
 %%%
 %%% This program is free software; you can redistribute it and/or
 %%% modify it under the terms of the GNU General Public License as
@@ -74,8 +74,8 @@ process([], #request{method = 'GET', data = <<>>}) ->
     {200, ?HEADER(?CT_XML), get_human_html_xmlel()};
 process([], #request{method = 'OPTIONS', data = <<>>}) ->
     {200, ?OPTIONS_HEADER, []};
-process(_Path, _Request) ->
-    ?DEBUG("Bad Request: ~p", [_Request]),
+process(_Path, Request) ->
+    ?DEBUG("Bad Request: ~p", [Request]),
     {400, ?HEADER(?CT_XML),
      #xmlel{name = <<"h1">>, attrs = [],
 	    children = [{xmlcdata, <<"400 Bad Request">>}]}}.
@@ -154,14 +154,22 @@ get_type(Hdrs) ->
 depends(_Host, _Opts) ->
     [].
 
-mod_opt_type(json) ->
+-ifdef(OTP_BELOW_27).
+mod_opt_type_json() ->
     econf:and_then(
       econf:bool(),
       fun(false) -> false;
 	 (true) ->
 	      ejabberd:start_app(jiffy),
 	      true
-      end);
+      end).
+-else.
+mod_opt_type_json() ->
+    econf:bool().
+-endif.
+
+mod_opt_type(json) ->
+    mod_opt_type_json();
 mod_opt_type(max_concat) ->
     econf:pos_int(unlimited);
 mod_opt_type(max_inactivity) ->

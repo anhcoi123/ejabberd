@@ -5,7 +5,7 @@
 %%% Created : 15 Sep 2014 by Christophe Romain <christophe.romain@process-one.net>
 %%%
 %%%
-%%% ejabberd, Copyright (C) 2002-2022   ProcessOne
+%%% ejabberd, Copyright (C) 2002-2025   ProcessOne
 %%%
 %%% This program is free software; you can redistribute it and/or
 %%% modify it under the terms of the GNU General Public License as
@@ -30,8 +30,8 @@
 -behaviour(gen_mod).
 
 -export([start/2, stop/1, reload/3, process/2, depends/2,
-         format_arg/2,
-	 mod_options/1, mod_doc/0]).
+         format_arg/2, handle/4,
+	 mod_opt_type/1, mod_options/1, mod_doc/0]).
 
 -include_lib("xmpp/include/xmpp.hrl").
 -include("logger.hrl").
@@ -39,7 +39,7 @@
 -include("ejabberd_stacktrace.hrl").
 -include("translate.hrl").
 
--define(DEFAULT_API_VERSION, 0).
+-define(DEFAULT_API_VERSION, 1000000).
 
 -define(CT_PLAIN,
         {<<"Content-Type">>, <<"text/plain">>}).
@@ -135,7 +135,7 @@ extract_auth(#request{auth = HTTPAuth, ip = {IP, _}, opts = Opts}) ->
 process(_, #request{method = 'POST', data = <<>>}) ->
     ?DEBUG("Bad Request: no data", []),
     badrequest_response(<<"Missing POST data">>);
-process([Call], #request{method = 'POST', data = Data, ip = IPPort} = Req) ->
+process([Call | _], #request{method = 'POST', data = Data, ip = IPPort} = Req) ->
     Version = get_api_version(Req),
     try
         Args = extract_args(Data),
@@ -153,7 +153,7 @@ process([Call], #request{method = 'POST', data = Data, ip = IPPort} = Req) ->
             ?DEBUG("Bad Request: ~p ~p", [_Error, StackTrace]),
             badrequest_response()
     end;
-process([Call], #request{method = 'GET', q = Data, ip = {IP, _}} = Req) ->
+process([Call | _], #request{method = 'GET', q = Data, ip = {IP, _}} = Req) ->
     Version = get_api_version(Req),
     try
         Args = case Data of
@@ -197,26 +197,29 @@ perform_call(Command, Args, Req, Version) ->
 %% Be tolerant to make API more easily usable from command-line pipe.
 extract_args(<<"\n">>) -> [];
 extract_args(Data) ->
-    case jiffy:decode(Data) of
-        List when is_list(List) -> List;
-        {List} when is_list(List) -> List;
-        Other -> [Other]
-    end.
+    Maps = misc:json_decode(Data),
+    maps:to_list(Maps).
 
 % get API version N from last "vN" element in URL path
-get_api_version(#request{path = Path}) ->
-    get_api_version(lists:reverse(Path));
-get_api_version([<<"v", String/binary>> | Tail]) ->
+get_api_version(#request{path = Path, host = Host}) ->
+    get_api_version(lists:reverse(Path), Host).
+
+get_api_version([<<"v", String/binary>> | Tail], Host) ->
     case catch binary_to_integer(String) of
 	N when is_integer(N) ->
 	    N;
 	_ ->
-	    get_api_version(Tail)
+	    get_api_version(Tail, Host)
     end;
-get_api_version([_Head | Tail]) ->
-    get_api_version(Tail);
-get_api_version([]) ->
-    ?DEFAULT_API_VERSION.
+get_api_version([_Head | Tail], Host) ->
+    get_api_version(Tail, Host);
+get_api_version([], Host) ->
+    try mod_http_api_opt:default_version(Host)
+    catch error:{module_not_loaded, ?MODULE, Host} ->
+        ?WARNING_MSG("Using module ~p for host ~s, but it isn't configured "
+                     "in the configuration file", [?MODULE, Host]),
+        ?DEFAULT_API_VERSION
+    end.
 
 %% ----------------
 %% command handlers
@@ -335,21 +338,43 @@ format_arg({Elements},
 		 ({Val}) when is_list(Val) ->
 		      format_arg({Val}, Tuple)
 	      end, Elements);
+format_arg(Map,
+	   {list, {_ElementDefName, {tuple, [{_Tuple1N, Tuple1S}, {_Tuple2N, Tuple2S}]}}})
+    when is_map(Map) andalso
+	 (Tuple1S == binary orelse Tuple1S == string) ->
+    maps:fold(
+	fun(K, V, Acc) ->
+	    [{format_arg(K, Tuple1S), format_arg(V, Tuple2S)} | Acc]
+	end, [], Map);
 format_arg(Elements,
 	   {list, {_ElementDefName, {list, _} = ElementDefFormat}})
     when is_list(Elements) ->
     [{format_arg(Element, ElementDefFormat)}
      || Element <- Elements];
+
+%% Covered by command_test_list and command_test_list_tuple
+format_arg(Element, {list, Def})
+    when not is_list(Element) ->
+    format_arg([Element], {list, Def});
 format_arg(Elements,
 	   {list, {_ElementDefName, ElementDefFormat}})
     when is_list(Elements) ->
     [format_arg(Element, ElementDefFormat)
      || Element <- Elements];
+
 format_arg({[{Name, Value}]},
 	   {tuple, [{_Tuple1N, Tuple1S}, {_Tuple2N, Tuple2S}]})
   when Tuple1S == binary;
        Tuple1S == string ->
     {format_arg(Name, Tuple1S), format_arg(Value, Tuple2S)};
+
+%% Covered by command_test_tuple and command_test_list_tuple
+format_arg(Elements,
+	   {tuple, ElementsDef})
+  when is_map(Elements) ->
+    list_to_tuple([element(2, maps:find(atom_to_binary(Name, latin1), Elements))
+                   || {Name, _Format} <- ElementsDef]);
+
 format_arg({Elements},
 	   {tuple, ElementsDef})
     when is_list(Elements) ->
@@ -366,11 +391,14 @@ format_arg({Elements},
 			  end
 		  end, ElementsDef),
     list_to_tuple(F);
+
 format_arg(Elements, {list, ElementsDef})
     when is_list(Elements) and is_atom(ElementsDef) ->
     [format_arg(Element, ElementsDef)
      || Element <- Elements];
+
 format_arg(Arg, integer) when is_integer(Arg) -> Arg;
+format_arg(Arg, integer) when is_binary(Arg) -> binary_to_integer(Arg);
 format_arg(Arg, binary) when is_list(Arg) -> process_unicode_codepoints(Arg);
 format_arg(Arg, binary) when is_binary(Arg) -> Arg;
 format_arg(Arg, string) when is_list(Arg) -> Arg;
@@ -412,7 +440,15 @@ format_command_result(Cmd, Auth, Result, Version) ->
 	    {_, T} = format_result(Result, ResultFormat),
 	    {200, T};
 	_ ->
-	    {200, {[format_result(Result, ResultFormat)]}}
+            OtherResult1 = format_result(Result, ResultFormat),
+            OtherResult2 = case Version of
+                               0 ->
+                                   {[OtherResult1]};
+                               _ ->
+                                   {_, Other3} = OtherResult1,
+                                   Other3
+                           end,
+	    {200, OtherResult2}
     end.
 
 format_result(Atom, {Name, atom}) ->
@@ -428,6 +464,9 @@ format_result([String | _] = StringList, {Name, string}) when is_list(String) ->
 format_result(String, {Name, string}) ->
     {misc:atom_to_binary(Name), iolist_to_binary(String)};
 
+format_result(Binary, {Name, binary}) ->
+    {misc:atom_to_binary(Name), Binary};
+
 format_result(Code, {Name, rescode}) ->
     {misc:atom_to_binary(Name), Code == true orelse Code == ok};
 
@@ -441,13 +480,17 @@ format_result(Code, {Name, restuple}) ->
      {[{<<"res">>, Code == true orelse Code == ok},
        {<<"text">>, <<"">>}]}};
 
-format_result(Els, {Name, {list, {_, {tuple, [{_, atom}, _]}} = Fmt}}) ->
+format_result(Els1, {Name, {list, {_, {tuple, [{_, atom}, _]}} = Fmt}}) ->
+    Els = lists:keysort(1, Els1),
     {misc:atom_to_binary(Name), {[format_result(El, Fmt) || El <- Els]}};
 
-format_result(Els, {Name, {list, {_, {tuple, [{name, string}, {value, _}]}} = Fmt}}) ->
+format_result(Els1, {Name, {list, {_, {tuple, [{name, string}, {value, _}]}} = Fmt}}) ->
+    Els = lists:keysort(1, Els1),
     {misc:atom_to_binary(Name), {[format_result(El, Fmt) || El <- Els]}};
 
-format_result(Els, {Name, {list, Def}}) ->
+%% Covered by command_test_list and command_test_list_tuple
+format_result(Els1, {Name, {list, Def}}) ->
+    Els = lists:sort(Els1),
     {misc:atom_to_binary(Name), [element(2, format_result(El, Def)) || El <- Els]};
 
 format_result(Tuple, {_Name, {tuple, [{_, atom}, ValFmt]}}) ->
@@ -460,9 +503,11 @@ format_result(Tuple, {_Name, {tuple, [{name, string}, {value, _} = ValFmt]}}) ->
     {_, Val2} = format_result(Val, ValFmt),
     {iolist_to_binary(Name2), Val2};
 
+%% Covered by command_test_tuple and command_test_list_tuple
 format_result(Tuple, {Name, {tuple, Def}}) ->
     Els = lists:zip(tuple_to_list(Tuple), Def),
-    {misc:atom_to_binary(Name), {[format_result(El, ElDef) || {El, ElDef} <- Els]}};
+    Els2 = [format_result(El, ElDef) || {El, ElDef} <- Els],
+    {misc:atom_to_binary(Name), maps:from_list(Els2)};
 
 format_result(404, {_Name, _}) ->
     "not_found".
@@ -487,10 +532,10 @@ invalid_token_response() ->
 badrequest_response() ->
     badrequest_response(<<"400 Bad Request">>).
 badrequest_response(Body) ->
-    json_response(400, jiffy:encode(Body)).
+    json_response(400, misc:json_encode(Body)).
 
 json_format({Code, Result}) ->
-    json_response(Code, jiffy:encode(Result));
+    json_response(Code, misc:json_encode(Result));
 json_format({HTMLCode, JSONErrorCode, Message}) ->
     json_error(HTMLCode, JSONErrorCode, Message).
 
@@ -501,9 +546,9 @@ json_response(Code, Body) when is_integer(Code) ->
 %% message is binary
 json_error(HTTPCode, JSONCode, Message) ->
     {HTTPCode, ?HEADER(?CT_JSON),
-     jiffy:encode({[{<<"status">>, <<"error">>},
-                    {<<"code">>, JSONCode},
-                    {<<"message">>, Message}]})
+     misc:json_encode(#{<<"status">> => <<"error">>,
+                    <<"code">> =>  JSONCode,
+                    <<"message">> => Message})
     }.
 
 log(Call, Args, {Addr, Port}) ->
@@ -513,29 +558,57 @@ log(Call, Args, IP) ->
     ?INFO_MSG("API call ~ts ~p (~p)", [Call, hide_sensitive_args(Args), IP]).
 
 hide_sensitive_args(Args=[_H|_T]) ->
-    lists:map( fun({<<"password">>, Password}) -> {<<"password">>, ejabberd_config:may_hide_data(Password)};
+    lists:map(fun({<<"password">>, Password}) -> {<<"password">>, ejabberd_config:may_hide_data(Password)};
          ({<<"newpass">>,NewPassword}) -> {<<"newpass">>, ejabberd_config:may_hide_data(NewPassword)};
          (E) -> E end,
          Args);
 hide_sensitive_args(NonListArgs) ->
     NonListArgs.
 
+mod_opt_type(default_version) ->
+    econf:either(
+        econf:int(0, 3),
+        econf:and_then(
+            econf:binary(),
+            fun(Binary) ->
+               case binary_to_list(Binary) of
+                   F when F >= "24.06" ->
+                       2;
+                   F when (F > "23.10") and (F < "24.06") ->
+                       1;
+                   F when F =< "23.10" ->
+                       0
+               end
+            end)).
+
+-spec mod_options(binary()) -> [{default_version, integer()}].
+
 mod_options(_) ->
-    [].
+    [{default_version, ?DEFAULT_API_VERSION}].
 
 mod_doc() ->
     #{desc =>
 	  [?T("This module provides a ReST interface to call "
-              "https://docs.ejabberd.im/developer/ejabberd-api[ejabberd API] "
+              "_`../../developer/ejabberd-api/index.md|ejabberd API`_ "
 	      "commands using JSON data."), "",
 	   ?T("To use this module, in addition to adding it to the 'modules' "
 	      "section, you must also enable it in 'listen' -> 'ejabberd_http' -> "
-              "http://../listen-options/#request-handlers[request_handlers]."), "",
+              "_`listen-options.md#request_handlers|request_handlers`_."), "",
 	   ?T("To use a specific API version N, when defining the URL path "
-	      "in the request_handlers, add a 'vN'. "
-	      "For example: '/api/v2: mod_http_api'"), "",
+	      "in the request_handlers, add a vN. "
+	      "For example: '/api/v2: mod_http_api'."), "",
 	   ?T("To run a command, send a POST request to the corresponding "
-	      "URL: 'http://localhost:5280/api/<command_name>'")],
+	      "URL: 'http://localhost:5280/api/COMMAND-NAME'")],
+     opts =>
+          [{default_version,
+            #{value => "integer() | string()",
+              note => "added in 24.12",
+              desc =>
+                  ?T("What API version to use when none is specified in the URL path. "
+                     "If setting an ejabberd version, it will use the latest API "
+                     "version that was available in that ejabberd version. "
+                     "For example, setting '\"24.06\"' in this option implies '2'. "
+                     "The default value is the latest version.")}}],
      example =>
          ["listen:",
           "  -",
@@ -545,4 +618,5 @@ mod_doc() ->
           "      /api: mod_http_api",
           "",
           "modules:",
-          "  mod_http_api: {}"]}.
+          "  mod_http_api:",
+          "    default_version: 2"]}.

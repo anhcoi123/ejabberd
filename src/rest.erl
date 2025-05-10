@@ -5,7 +5,7 @@
 %%% Created : 16 Oct 2014 by Christophe Romain <christophe.romain@process-one.net>
 %%%
 %%%
-%%% ejabberd, Copyright (C) 2002-2022   ProcessOne
+%%% ejabberd, Copyright (C) 2002-2025   ProcessOne
 %%%
 %%% This program is free software; you can redistribute it and/or
 %%% modify it under the terms of the GNU General Public License as
@@ -147,7 +147,7 @@ to_list(V) when is_list(V) ->
     V.
 
 encode_json(Content) ->
-    case catch jiffy:encode(Content) of
+    case catch misc:json_encode(Content) of
         {'EXIT', Reason} ->
             {error, {invalid_payload, Content, Reason}};
         Encoded ->
@@ -157,7 +157,7 @@ encode_json(Content) ->
 decode_json(<<>>) -> [];
 decode_json(<<" ">>) -> [];
 decode_json(<<"\r\n">>) -> [];
-decode_json(Data) -> jiffy:decode(Data).
+decode_json(Data) -> misc:json_decode(Data).
 
 custom_headers(Server) ->
   case ejabberd_option:ext_api_headers(Server) of

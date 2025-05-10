@@ -5,7 +5,7 @@
 %%% Created : 29 May 2007 by Badlop <badlop@process-one.net>
 %%%
 %%%
-%%% ejabberd, Copyright (C) 2002-2022   ProcessOne
+%%% ejabberd, Copyright (C) 2002-2025   ProcessOne
 %%%
 %%% This program is free software; you can redistribute it and/or
 %%% modify it under the terms of the GNU General Public License as
@@ -27,7 +27,7 @@
 
 -author('badlop@process-one.net').
 
--protocol({xep, 33, '1.1'}).
+-protocol({xep, 33, '1.1', '15.04', "complete", ""}).
 
 -behaviour(gen_server).
 
@@ -66,8 +66,6 @@
 
 %% All the elements are of type value()
 
--define(VERSION_MULTICAST, <<"$Revision: 440 $ ">>).
-
 -define(PURGE_PROCNAME,
 	ejabberd_mod_multicast_purgeloop).
 
@@ -78,8 +76,6 @@
 -define(MAXTIME_CACHE_NEGOTIATING, 600).
 
 -define(CACHE_PURGE_TIMER, 86400000).
-
--define(DISCO_QUERY_TIMEOUT, 10000).
 
 -define(DEFAULT_LIMIT_LOCAL_MESSAGE, 100).
 
@@ -268,8 +264,6 @@ process_iq(#iq{type = T}, _) when T == set; T == get ->
 process_iq(_, _) ->
     reply.
 
--define(FEATURE(Feat), Feat).
-
 iq_disco_info(From, Lang, State) ->
     Name = mod_multicast_opt:name(State#state.lserver),
     #disco_info{
@@ -413,7 +407,7 @@ route_grouped(LServer, LService, From, Groups, RestOfAddresses, Packet) ->
 		route_single ->
 		    route_individual(From, CC, BCC, OtherCC ++ RestOfAddresses, Packet);
 		{route_multicast, Service, Limits} ->
-		    route_multicast(From, Service, CC, BCC, OtherCC ++ RestOfAddresses, Packet, Limits)
+		    route_multicast(From, jid:make(Service), CC, BCC, OtherCC ++ RestOfAddresses, Packet, Limits)
 	    end
 	end, ok, Groups).
 

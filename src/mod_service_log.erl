@@ -5,7 +5,7 @@
 %%% Created : 24 Aug 2003 by Alexey Shchepin <alexey@process-one.net>
 %%%
 %%%
-%%% ejabberd, Copyright (C) 2002-2022   ProcessOne
+%%% ejabberd, Copyright (C) 2002-2025   ProcessOne
 %%%
 %%% This program is free software; you can redistribute it and/or
 %%% modify it under the terms of the GNU General Public License as
@@ -36,18 +36,11 @@
 -include("translate.hrl").
 -include_lib("xmpp/include/xmpp.hrl").
 
-start(Host, _Opts) ->
-    ejabberd_hooks:add(user_send_packet, Host, ?MODULE,
-		       log_user_send, 50),
-    ejabberd_hooks:add(user_receive_packet, Host, ?MODULE,
-		       log_user_receive, 50),
-    ok.
+start(_Host, _Opts) ->
+    {ok, [{hook, user_send_packet, log_user_send, 50},
+          {hook, user_receive_packet, log_user_receive, 50}]}.
 
-stop(Host) ->
-    ejabberd_hooks:delete(user_send_packet, Host, ?MODULE,
-			  log_user_send, 50),
-    ejabberd_hooks:delete(user_receive_packet, Host,
-			  ?MODULE, log_user_receive, 50),
+stop(_Host) ->
     ok.
 
 depends(_Host, _Opts) ->
@@ -99,9 +92,7 @@ mod_doc() ->
                      "to which stanzas will be forwarded.")}}],
       example =>
           ["modules:",
-           "  ...",
            "  mod_service_log:",
            "    loggers:",
            "      - xmpp-server.tld",
-           "      - component.domain.tld",
-           "  ..."]}.
+           "      - component.domain.tld"]}.

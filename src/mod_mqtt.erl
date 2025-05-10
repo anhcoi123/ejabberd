@@ -1,6 +1,6 @@
 %%%-------------------------------------------------------------------
 %%% @author Evgeny Khramtsov <ekhramtsov@process-one.net>
-%%% @copyright (C) 2002-2022 ProcessOne, SARL. All Rights Reserved.
+%%% @copyright (C) 2002-2025 ProcessOne, SARL. All Rights Reserved.
 %%%
 %%% Licensed under the Apache License, Version 2.0 (the "License");
 %%% you may not use this file except in compliance with the License.
@@ -128,6 +128,7 @@ publish({_, S, _} = USR, Pkt, ExpiryTime) ->
         allow ->
             case retain(USR, Pkt, ExpiryTime) of
                 ok ->
+		    ejabberd_hooks:run(mqtt_publish, S, [USR, Pkt, ExpiryTime]),
                     Mod = gen_mod:ram_db_mod(S, ?MODULE),
                     route(Mod, S, Pkt, ExpiryTime);
                 {error, _} = Err ->
@@ -146,6 +147,7 @@ subscribe({_, S, _} = USR, TopicFilter, SubOpts, ID) ->
 	allow ->
             case check_subscribe_access(TopicFilter, USR) of
                 allow ->
+		    ejabberd_hooks:run(mqtt_subscribe, S, [USR, TopicFilter, SubOpts, ID]),
                     Mod:subscribe(USR, TopicFilter, SubOpts, ID);
                 deny ->
                     {error, subscribe_forbidden}
@@ -157,6 +159,7 @@ subscribe({_, S, _} = USR, TopicFilter, SubOpts, ID) ->
 -spec unsubscribe(jid:ljid(), binary()) -> ok | {error, notfound | db_failure}.
 unsubscribe({U, S, R}, Topic) ->
     Mod = gen_mod:ram_db_mod(S, ?MODULE),
+    ejabberd_hooks:run(mqtt_unsubscribe, S, [{U, S, R}, Topic]),
     Mod:unsubscribe({U, S, R}, Topic).
 
 -spec select_retained(jid:ljid(), binary(), qos(), non_neg_integer()) ->
@@ -279,7 +282,7 @@ listen_options() ->
 mod_doc() ->
     #{desc =>
           ?T("This module adds "
-             "https://docs.ejabberd.im/admin/guide/mqtt/[support for the MQTT] "
+             "_`../guide/mqtt/index.md|support for the MQTT`_ "
              "protocol version '3.1.1' and '5.0'. Remember to configure "
 	     "'mod_mqtt' in 'modules' and  'listen' sections."),
       opts =>
@@ -603,7 +606,7 @@ match([H|T1], [<<"%c">>|T2], U, S, R) ->
     end;
 match([H|T1], [<<"%g">>|T2], U, S, R) ->
     case jid:resourceprep(H) of
-        H -> 
+        H ->
             case acl:loaded_shared_roster_module(S) of
                 undefined -> false;
                 Mod ->

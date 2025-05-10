@@ -5,7 +5,7 @@
 %%% Created : 14 Dec 2002 by Alexey Shchepin <alexey@process-one.net>
 %%%
 %%%
-%%% ejabberd, Copyright (C) 2002-2022   ProcessOne
+%%% ejabberd, Copyright (C) 2002-2025   ProcessOne
 %%%
 %%% This program is free software; you can redistribute it and/or
 %%% modify it under the terms of the GNU General Public License as
@@ -37,13 +37,14 @@
 -export([beams/1, validators/1, globals/0, may_hide_data/1]).
 -export([dump/0, dump/1, convert_to_yaml/1, convert_to_yaml/2]).
 -export([callback_modules/1]).
+-export([set_option/2]).
+-export([get_defined_keywords/1, get_predefined_keywords/1, replace_keywords/2, replace_keywords/3]).
 
 %% Deprecated functions
--export([get_option/2, set_option/2]).
+-export([get_option/2]).
 -export([get_version/0, get_myhosts/0]).
 -export([get_mylang/0, get_lang/1]).
 -deprecated([{get_option, 2},
-	     {set_option, 2},
 	     {get_version, 0},
 	     {get_myhosts, 0},
 	     {get_mylang, 0},
@@ -67,6 +68,10 @@
 -callback doc() -> any().
 
 -optional_callbacks([globals/0]).
+
+-ifndef(OTP_BELOW_28).
+-dialyzer([no_opaque_union]).
+-endif.
 
 %%%===================================================================
 %%% API
@@ -111,6 +116,9 @@ reload() ->
 			    ejabberd_hooks:run(host_down, [Host])
 		    end, DelHosts),
 		  ejabberd_hooks:run(config_reloaded, []),
+		  % logger is started too early to be able to use hooks, so
+		  % we need to call it separately
+		  ejabberd_logger:config_reloaded(),
 		  delete_host_options(DelHosts),
 		  ?INFO_MSG("Configuration reloaded successfully", []);
 	      Err ->
@@ -203,7 +211,7 @@ get_lang(Host) ->
 
 -spec get_uri() -> binary().
 get_uri() ->
-    <<"http://www.process-one.net/en/ejabberd/">>.
+    <<"https://www.process-one.net/ejabberd/">>.
 
 -spec get_copyright() -> binary().
 get_copyright() ->
@@ -297,14 +305,21 @@ beams(external) ->
               end
       end, ExtMods),
     case application:get_env(ejabberd, external_beams) of
-        {ok, Path} ->
-            case lists:member(Path, code:get_path()) of
-                true -> ok;
-                false -> code:add_patha(Path)
-            end,
-            Beams = filelib:wildcard(filename:join(Path, "*\.beam")),
-            CustMods = [list_to_atom(filename:rootname(filename:basename(Beam)))
-                        || Beam <- Beams],
+        {ok, Path0} ->
+	    Paths = case Path0 of
+		[L|_] = V when is_list(L) -> V;
+		L -> [L]
+	    end,
+	    CustMods = lists:foldl(
+		fun(Path, CM) ->
+		    case lists:member(Path, code:get_path()) of
+			true -> ok;
+			false -> code:add_patha(Path)
+		    end,
+		    Beams = filelib:wildcard(filename:join(Path, "*\.beam")),
+		    CM ++ [list_to_atom(filename:rootname(filename:basename(Beam)))
+			   || Beam <- Beams]
+		end, [], Paths),
             CustMods ++ ExtMods;
         _ ->
             ExtMods
@@ -335,12 +350,20 @@ env_binary_to_list(Application, Parameter) ->
             Other
     end.
 
+%% ejabberd_options calls this function when parsing options inside host_config
 -spec validators([atom()]) -> {econf:validators(), [atom()]}.
 validators(Disallowed) ->
+    Host = global,
+    DefinedKeywords = get_defined_keywords(Host),
+    validators(Disallowed, DefinedKeywords).
+
+%% validate/1 calls this function when parsing toplevel options
+-spec validators([atom()], [any()]) -> {econf:validators(), [atom()]}.
+validators(Disallowed, DK) ->
     Modules = callback_modules(all),
     Validators = lists:foldl(
 		   fun(M, Vs) ->
-			   maps:merge(Vs, validators(M, Disallowed))
+			   maps:merge(Vs, validators(M, Disallowed, DK))
 		   end, #{}, Modules),
     Required = lists:flatmap(
 		 fun(M) ->
@@ -396,6 +419,98 @@ format_error({error, {exception, Class, Reason, St}}) ->
 	"code, please report the bug with ejabberd configuration "
 	"file attached and the following stacktrace included:~n** ~ts",
 	[misc:format_exception(2, Class, Reason, St)])).
+
+%% @format-begin
+
+replace_keywords(Host, Value) ->
+    Keywords = get_defined_keywords(Host) ++ get_predefined_keywords(Host),
+    replace_keywords(Host, Value, Keywords).
+
+replace_keywords(Host, List, Keywords) when is_list(List) ->
+    [replace_keywords(Host, Element, Keywords) || Element <- List];
+replace_keywords(Host, Atom, Keywords) when is_atom(Atom) ->
+    Str = atom_to_list(Atom),
+    Bin = iolist_to_binary(Str),
+    case Str == string:uppercase(Str) of
+        false ->
+            BinaryReplaced = replace_keywords(Host, Bin, Keywords),
+            binary_to_atom(BinaryReplaced, utf8);
+        true ->
+            case proplists:get_value(Bin, Keywords) of
+                undefined ->
+                    Atom;
+                Replacement ->
+                    Replacement
+            end
+    end;
+replace_keywords(_Host, Binary, Keywords) when is_binary(Binary) ->
+    lists:foldl(fun ({Key, Replacement}, V) when is_binary(Replacement) ->
+                        misc:expand_keyword(<<"@", Key/binary, "@">>, V, Replacement);
+                    ({_, _}, V) ->
+                        V
+                end,
+                Binary,
+                Keywords);
+replace_keywords(Host, {Element1, Element2}, Keywords) ->
+    {Element1, replace_keywords(Host, Element2, Keywords)};
+replace_keywords(_Host, Value, _DK) ->
+    Value.
+
+get_defined_keywords(Host) ->
+    Tab = case get_tmp_config() of
+              undefined ->
+                  ejabberd_options;
+              T ->
+                  T
+          end,
+    get_defined_keywords(Tab, Host).
+
+get_defined_keywords(Tab, Host) ->
+    KeysHost =
+        case ets:lookup(Tab, {define_keyword, Host}) of
+            [{_, List}] ->
+                List;
+            _ ->
+                []
+        end,
+    KeysGlobal =
+        case Host /= global andalso ets:lookup(Tab, {define_keyword, global}) of
+            [{_, ListG}] ->
+                ListG;
+            _ ->
+                []
+        end,
+    %% Trying to get defined keywords in host_config when starting ejabberd,
+    %% the options are not yet stored in ets
+    KeysTemp =
+        case not is_atom(Tab) andalso KeysHost == [] andalso KeysGlobal == [] of
+            true ->
+                get_defined_keywords_yaml_config(ets:lookup_element(Tab, {yaml_config, global}, 2));
+            false ->
+                []
+        end,
+    lists:reverse(KeysTemp ++ KeysGlobal ++ KeysHost).
+
+get_defined_keywords_yaml_config(Y) ->
+    [{erlang:atom_to_binary(KwAtom, latin1), KwValue}
+     || {KwAtom, KwValue} <- proplists:get_value(define_keyword, Y, [])].
+
+get_predefined_keywords(Host) ->
+    HostList =
+        case Host of
+            global ->
+                [];
+            _ ->
+                [{<<"HOST">>, Host}]
+        end,
+    {ok, [[Home]]} = init:get_argument(home),
+    HostList
+    ++ [{<<"HOME">>, list_to_binary(Home)},
+        {<<"SEMVER">>, ejabberd_option:version()},
+        {<<"VERSION">>,
+         misc:semver_to_xxyy(
+             ejabberd_option:version())}].
+%% @format-end
 
 %%%===================================================================
 %%% Internal functions
@@ -463,21 +578,44 @@ callback_modules(external) ->
 	      end
       end, beams(external));
 callback_modules(all) ->
-    callback_modules(local) ++ callback_modules(external).
+    lists_uniq(callback_modules(local) ++ callback_modules(external)).
 
--spec validators(module(), [atom()]) -> econf:validators().
-validators(Mod, Disallowed) ->
+-ifdef(OTP_BELOW_25).
+lists_uniq(List) ->
+    {Res, _} = lists:foldr(
+	fun(El, {Result, Existing} = Acc) ->
+	    case maps:is_key(El, Existing) of
+		true -> Acc;
+		_ -> {[El | Result], Existing#{El => true}}
+	    end
+	end, {[], #{}}, List),
+    Res.
+-else.
+lists_uniq(List) ->
+    lists:uniq(List).
+-endif.
+
+-spec validators(module(), [atom()], [any()]) -> econf:validators().
+validators(Mod, Disallowed, DK) ->
+    Keywords = DK ++ get_predefined_keywords(global),
     maps:from_list(
       lists:filtermap(
 	fun(O) ->
 		case lists:member(O, Disallowed) of
 		    true -> false;
 		    false ->
-			{true,
-			 try {O, Mod:opt_type(O)}
+			Type =
+			 try Mod:opt_type(O)
 			 catch _:_ ->
-				 {O, ejabberd_options:opt_type(O)}
-			 end}
+				 ejabberd_options:opt_type(O)
+			 end,
+                         TypeProcessed =
+                             econf:and_then(
+                                  fun(B) ->
+                                      replace_keywords(global, B, Keywords)
+                                  end,
+                              Type),
+			{true, {O, TypeProcessed}}
 		end
 	end, proplists:get_keys(Mod:options()))).
 
@@ -502,13 +640,34 @@ read_file(File, Opts) ->
 	  end,
     case Ret of
 	{ok, Y} ->
-	    validate(Y);
+            InstalledModules = maybe_install_contrib_modules(Y),
+            ValResult = validate(Y),
+            case InstalledModules of
+                [] -> ok;
+                _ -> spawn(fun() -> timer:sleep(5000), ?MODULE:reload() end)
+            end,
+            ValResult;
 	Err ->
 	    Err
     end.
 
+get_additional_macros() ->
+    MacroStrings = lists:foldl(fun([$E, $J, $A, $B, $B, $E, $R, $D, $_, $M, $A, $C, $R, $O, $_ | MacroString], Acc) ->
+                                        [parse_macro_string(MacroString) | Acc];
+                                   (_, Acc) ->
+                                        Acc
+                                end,
+                                [],
+                                os:getenv()),
+    {additional_macros, MacroStrings}.
+
+parse_macro_string(MacroString) ->
+    [NameString, ValueString] = string:split(MacroString, "="),
+    {ok, [ValueDecoded]} = fast_yaml:decode(ValueString, [plain_as_atom]),
+    {list_to_atom(NameString), ValueDecoded}.
+
 read_yaml_files(Files, Opts) ->
-    ParseOpts = [plain_as_atom | lists:flatten(Opts)],
+    ParseOpts = [plain_as_atom, get_additional_macros() | lists:flatten(Opts)],
     lists:foldl(
       fun(File, {ok, Y1}) ->
 	      case econf:parse(File, #{'_' => econf:any()}, ParseOpts) of
@@ -527,21 +686,35 @@ read_erlang_file(File, _) ->
 	    Err
     end.
 
+-spec maybe_install_contrib_modules(term()) -> [atom()].
+maybe_install_contrib_modules(Options) ->
+    case {lists:keysearch(allow_contrib_modules, 1, Options),
+          lists:keysearch(install_contrib_modules, 1, Options)} of
+        {Allow, {value, {_, InstallContribModules}}}
+          when (Allow == false) or
+               (Allow == {value, {allow_contrib_modules, true}}) ->
+            ext_mod:install_contrib_modules(InstallContribModules, Options);
+        _ ->
+            []
+    end.
+
 -spec validate(term()) -> {ok, [{atom(), term()}]} | error_return().
 validate(Y1) ->
     case pre_validate(Y1) of
 	{ok, Y2} ->
 	    set_loglevel(proplists:get_value(loglevel, Y2, info)),
+	    ejabberd_logger:set_modules_fully_logged(proplists:get_value(log_modules_fully, Y2, [])),
 	    case ejabberd_config_transformer:map_reduce(Y2) of
 		{ok, Y3} ->
 		    Hosts = proplists:get_value(hosts, Y3),
 		    Version = proplists:get_value(version, Y3, version()),
+		    DK = get_defined_keywords_yaml_config(Y3),
 		    create_tmp_config(),
 		    set_option(hosts, Hosts),
 		    set_option(host, hd(Hosts)),
 		    set_option(version, Version),
 		    set_option(yaml_config, Y3),
-		    {Validators, Required} = validators([]),
+		    {Validators, Required} = validators([], DK),
 		    Validator = econf:options(Validators,
 					      [{required, Required},
 					       unique]),

@@ -3,7 +3,7 @@
 %%% Created : 30 Mar 2017 by Evgeny Khramtsov <ekhramtsov@process-one.net>
 %%%
 %%%
-%%% ejabberd, Copyright (C) 2002-2022   ProcessOne
+%%% ejabberd, Copyright (C) 2002-2025   ProcessOne
 %%%
 %%% This program is free software; you can redistribute it and/or
 %%% modify it under the terms of the GNU General Public License as
@@ -26,6 +26,7 @@
 
 %% API
 -export([init/0, register_stream/2, unregister_stream/1, activate_stream/4]).
+-export([sql_schemas/0]).
 
 -include("logger.hrl").
 -include("ejabberd_sql_pt.hrl").
@@ -34,6 +35,8 @@
 %%% API
 %%%===================================================================
 init() ->
+    ejabberd_sql_schema:update_schema(
+      ejabberd_config:get_myname(), ?MODULE, sql_schemas()),
     NodeS = erlang:atom_to_binary(node(), latin1),
     ?DEBUG("Cleaning SQL 'proxy65' table...", []),
     case ejabberd_sql:sql_query(
@@ -46,6 +49,25 @@ init() ->
 	    ?ERROR_MSG("Failed to clean 'proxy65' table: ~p", [Err]),
 	    Err
     end.
+
+sql_schemas() ->
+    [#sql_schema{
+        version = 1,
+        tables =
+            [#sql_table{
+                name = <<"proxy65">>,
+                columns =
+                    [#sql_column{name = <<"sid">>, type = text},
+                     #sql_column{name = <<"pid_t">>, type = text},
+                     #sql_column{name = <<"pid_i">>, type = text},
+                     #sql_column{name = <<"node_t">>, type = text},
+                     #sql_column{name = <<"node_i">>, type = text},
+                     #sql_column{name = <<"jid_i">>, type = text}],
+                indices = [#sql_index{
+                              columns = [<<"sid">>],
+                              unique = true},
+                           #sql_index{
+                              columns = [<<"jid_i">>]}]}]}].
 
 register_stream(SID, Pid) ->
     PidS = misc:encode_pid(Pid),

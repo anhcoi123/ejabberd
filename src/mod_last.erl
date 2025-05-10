@@ -5,7 +5,7 @@
 %%% Created : 24 Oct 2003 by Alexey Shchepin <alexey@process-one.net>
 %%%
 %%%
-%%% ejabberd, Copyright (C) 2002-2022   ProcessOne
+%%% ejabberd, Copyright (C) 2002-2025   ProcessOne
 %%%
 %%% This program is free software; you can redistribute it and/or
 %%% modify it under the terms of the GNU General Public License as
@@ -27,7 +27,7 @@
 
 -author('alexey@process-one.net').
 
--protocol({xep, 12, '2.0'}).
+-protocol({xep, 12, '2.0', '0.5.0', "complete", ""}).
 
 -behaviour(gen_mod).
 
@@ -62,32 +62,15 @@ start(Host, Opts) ->
     Mod = gen_mod:db_mod(Opts, ?MODULE),
     Mod:init(Host, Opts),
     init_cache(Mod, Host, Opts),
-    gen_iq_handler:add_iq_handler(ejabberd_local, Host,
-				  ?NS_LAST, ?MODULE, process_local_iq),
-    gen_iq_handler:add_iq_handler(ejabberd_sm, Host,
-				  ?NS_LAST, ?MODULE, process_sm_iq),
-    ejabberd_hooks:add(privacy_check_packet, Host, ?MODULE,
-		       privacy_check_packet, 30),
-    ejabberd_hooks:add(register_user, Host, ?MODULE,
-		       register_user, 50),
-    ejabberd_hooks:add(remove_user, Host, ?MODULE,
-		       remove_user, 50),
-    ejabberd_hooks:add(unset_presence_hook, Host, ?MODULE,
-		       on_presence_update, 50).
+    {ok, [{iq_handler, ejabberd_local, ?NS_LAST, process_local_iq},
+          {iq_handler, ejabberd_sm, ?NS_LAST, process_sm_iq},
+          {hook, privacy_check_packet, privacy_check_packet, 30},
+          {hook, register_user, register_user, 50},
+          {hook, remove_user, remove_user, 50},
+          {hook, unset_presence_hook, on_presence_update, 50}]}.
 
-stop(Host) ->
-    ejabberd_hooks:delete(register_user, Host, ?MODULE,
-			  register_user, 50),
-    ejabberd_hooks:delete(remove_user, Host, ?MODULE,
-			  remove_user, 50),
-    ejabberd_hooks:delete(unset_presence_hook, Host,
-			  ?MODULE, on_presence_update, 50),
-    ejabberd_hooks:delete(privacy_check_packet, Host, ?MODULE,
-			  privacy_check_packet, 30),
-    gen_iq_handler:remove_iq_handler(ejabberd_local, Host,
-				     ?NS_LAST),
-    gen_iq_handler:remove_iq_handler(ejabberd_sm, Host,
-				     ?NS_LAST).
+stop(_Host) ->
+    ok.
 
 reload(Host, NewOpts, OldOpts) ->
     NewMod = gen_mod:db_mod(NewOpts, ?MODULE),

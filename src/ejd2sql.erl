@@ -5,7 +5,7 @@
 %%% Created : 22 Aug 2005 by Alexey Shchepin <alexey@process-one.net>
 %%%
 %%%
-%%% ejabberd, Copyright (C) 2002-2022   ProcessOne
+%%% ejabberd, Copyright (C) 2002-2025   ProcessOne
 %%%
 %%% This program is free software; you can redistribute it and/or
 %%% modify it under the terms of the GNU General Public License as
@@ -74,7 +74,10 @@ export(Server, Output) ->
     close_output(Output, IO).
 
 export(Server, Output, mod_mam = M1) ->
-    MucServices = gen_mod:get_module_opt_hosts(Server, mod_muc),
+    MucServices = case gen_mod:is_loaded(Server, mod_muc) of
+        true -> gen_mod:get_module_opt_hosts(Server, mod_muc);
+        false -> []
+    end,
     [export2(MucService, Output, M1, M1) || MucService <- MucServices],
     export2(Server, Output, M1, M1);
 export(Server, Output, mod_pubsub = M1) ->
@@ -165,12 +168,18 @@ import_info(Mod) ->
 %%%----------------------------------------------------------------------
 export(LServer, Table, IO, ConvertFun) ->
     DbType = ejabberd_option:sql_type(LServer),
+    LServerConvert = case Table of
+                         archive_msg ->
+                             [LServer | mod_muc_admin:find_hosts(LServer)];
+                         _ ->
+                             LServer
+                     end,
     F = fun () ->
                 mnesia:read_lock_table(Table),
                 {_N, SQLs} =
                     mnesia:foldl(
                       fun(R, {N, SQLs} = Acc) ->
-                              case ConvertFun(LServer, R) of
+                              case ConvertFun(LServerConvert, R) of
                                   [] ->
                                       Acc;
                                   SQL1 ->

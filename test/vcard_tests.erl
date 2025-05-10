@@ -3,7 +3,7 @@
 %%% Created : 16 Nov 2016 by Evgeny Khramtsov <ekhramtsov@process-one.net>
 %%%
 %%%
-%%% ejabberd, Copyright (C) 2002-2022   ProcessOne
+%%% ejabberd, Copyright (C) 2002-2025   ProcessOne
 %%%
 %%% This program is free software; you can redistribute it and/or
 %%% modify it under the terms of the GNU General Public License as
@@ -31,6 +31,7 @@
 		recv_presence/1, recv/1]).
 
 -include("suite.hrl").
+-include_lib("stdlib/include/assert.hrl").
 
 %%%===================================================================
 %%% API
@@ -83,9 +84,9 @@ get_set(Config) ->
 			     "personal website: http://www.saint-andre.com/">>},
     #iq{type = result, sub_els = []} =
         send_recv(Config, #iq{type = set, sub_els = [VCard]}),
-    %% TODO: check if VCard == VCard1.
-    #iq{type = result, sub_els = [_VCard1]} =
+    #iq{type = result, sub_els = [VCard1]} =
         send_recv(Config, #iq{type = get, sub_els = [#vcard_temp{}]}),
+    ?assertEqual(VCard, VCard1),
     disconnect(Config).
 
 service_vcard(Config) ->
@@ -118,7 +119,7 @@ xupdate_master(Config) ->
 	      sub_els = [#vcard_xupdate{hash = ImgHash}]} = recv_presence(Config),
     #iq{type = result, sub_els = []} =
 	send_recv(Config, #iq{type = set, sub_els = [#vcard_temp{}]}),
-    ?recv2(#presence{from = MyJID, type = available,
+    {_, _} = ?recv2(#presence{from = MyJID, type = available,
 		     sub_els = [#vcard_xupdate{hash = undefined}]},
 	   #presence{from = Peer, type = unavailable}),
     disconnect(Config).

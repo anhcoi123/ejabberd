@@ -1,5 +1,5 @@
 %%%----------------------------------------------------------------------
-%%% ejabberd, Copyright (C) 2002-2022   ProcessOne
+%%% ejabberd, Copyright (C) 2002-2025   ProcessOne
 %%%
 %%% This program is free software; you can redistribute it and/or
 %%% modify it under the terms of the GNU General Public License as
@@ -39,14 +39,14 @@
 -type acl_rule() :: {user, {binary(), binary()} | binary()} |
 		    {server, binary()} |
 		    {resource, binary()} |
-		    {user_regexp, {re:mp(), binary()} | re:mp()} |
-		    {server_regexp, re:mp()} |
-		    {resource_regexp, re:mp()} |
-		    {node_regexp, {re:mp(), re:mp()}} |
-		    {user_glob, {re:mp(), binary()} | re:mp()} |
-		    {server_glob, re:mp()} |
-		    {resource_glob, re:mp()} |
-		    {node_glob, {re:mp(), re:mp()}} |
+		    {user_regexp, {misc:re_mp(), binary()} | misc:re_mp()} |
+		    {server_regexp, misc:re_mp()} |
+		    {resource_regexp, misc:re_mp()} |
+		    {node_regexp, {misc:re_mp(), misc:re_mp()}} |
+		    {user_glob, {misc:re_mp(), binary()} | misc:re_mp()} |
+		    {server_glob, misc:re_mp()} |
+		    {resource_glob, misc:re_mp()} |
+		    {node_glob, {misc:re_mp(), misc:re_mp()}} |
 		    {shared_group, {binary(), binary()} | binary()} |
 		    {ip, ip_mask()}.
 -type access() :: [{action(), [access_rule()]}].
@@ -106,8 +106,8 @@ match_acl(_Host, {shared_group, {G, H}}, #{usr := {U, S, _}}) ->
 	undefined -> false;
 	Mod -> Mod:is_user_in_group({U, S}, G, H)
     end;
-match_acl(Host, {shared_group, G}, Map) ->
-    match_acl(Host, {shared_group, {G, Host}}, Map);
+match_acl(Host, {shared_group, G}, #{usr := {_, S, _}} = Map) ->
+    match_acl(Host, {shared_group, {G, S}}, Map);
 match_acl(_Host, {user_regexp, {UR, S1}}, #{usr := {U, S2, _}}) ->
     S1 == S2 andalso match_regexp(U, UR);
 match_acl(_Host, {user_regexp, UR}, #{usr := {U, S, _}}) ->
@@ -348,7 +348,7 @@ node_validator(UV, SV) ->
 %%%===================================================================
 %%% Aux
 %%%===================================================================
--spec match_regexp(iodata(), re:mp()) -> boolean().
+-spec match_regexp(iodata(), misc:re_mp()) -> boolean().
 match_regexp(Data, RegExp) ->
     re:run(Data, RegExp) /= nomatch.
 

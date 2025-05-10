@@ -4,7 +4,7 @@
 %%% Created : 14 Apr 2016 by Evgeny Khramtsov <ekhramtsov@process-one.net>
 %%%
 %%%
-%%% ejabberd, Copyright (C) 2002-2022   ProcessOne
+%%% ejabberd, Copyright (C) 2002-2025   ProcessOne
 %%%
 %%% This program is free software; you can redistribute it and/or
 %%% modify it under the terms of the GNU General Public License as
@@ -34,6 +34,8 @@
 
 -export([item_to_raw/1, raw_to_item/1]).
 
+-export([sql_schemas/0]).
+
 -include_lib("xmpp/include/xmpp.hrl").
 -include("mod_privacy.hrl").
 -include("logger.hrl").
@@ -42,8 +44,56 @@
 %%%===================================================================
 %%% API
 %%%===================================================================
-init(_Host, _Opts) ->
+init(Host, _Opts) ->
+    ejabberd_sql_schema:update_schema(Host, ?MODULE, sql_schemas()),
     ok.
+
+sql_schemas() ->
+    [#sql_schema{
+        version = 1,
+        tables =
+            [#sql_table{
+                name = <<"privacy_default_list">>,
+                columns =
+                    [#sql_column{name = <<"username">>, type = text},
+                     #sql_column{name = <<"server_host">>, type = text},
+                     #sql_column{name = <<"name">>, type = text}],
+                indices = [#sql_index{
+                              columns = [<<"server_host">>, <<"username">>],
+                              unique = true}]},
+             #sql_table{
+                name = <<"privacy_list">>,
+                columns =
+                    [#sql_column{name = <<"username">>, type = text},
+                     #sql_column{name = <<"server_host">>, type = text},
+                     #sql_column{name = <<"name">>, type = text},
+                     #sql_column{name = <<"id">>, type = bigserial},
+                     #sql_column{name = <<"created_at">>, type = timestamp,
+                                 default = true}],
+                indices = [#sql_index{
+                              columns = [<<"id">>],
+                              unique = true},
+                           #sql_index{
+                              columns = [<<"server_host">>, <<"username">>,
+                                         <<"name">>],
+                              unique = true}]},
+             #sql_table{
+                name = <<"privacy_list_data">>,
+                columns =
+                    [#sql_column{name = <<"id">>, type = bigint,
+                                 opts = [#sql_references{
+                                            table = <<"privacy_list">>,
+                                            column = <<"id">>}]},
+                     #sql_column{name = <<"t">>, type = {char, 1}},
+                     #sql_column{name = <<"value">>, type = text},
+                     #sql_column{name = <<"action">>, type = {char, 1}},
+                     #sql_column{name = <<"ord">>, type = numeric},
+                     #sql_column{name = <<"match_all">>, type = boolean},
+                     #sql_column{name = <<"match_iq">>, type = boolean},
+                     #sql_column{name = <<"match_message">>, type = boolean},
+                     #sql_column{name = <<"match_presence_in">>, type = boolean},
+                     #sql_column{name = <<"match_presence_out">>, type = boolean}],
+                indices = [#sql_index{columns = [<<"id">>]}]}]}].
 
 unset_default(LUser, LServer) ->
     case unset_default_privacy_list(LUser, LServer) of
@@ -107,16 +157,21 @@ set_lists(#privacy{us = {LUser, LServer},
 
 set_list(LUser, LServer, Name, List) ->
     RItems = lists:map(fun item_to_raw/1, List),
-    F = fun () ->
-		ID = case get_privacy_list_id_t(LUser, LServer, Name) of
-                         {selected, []} ->
-			     add_privacy_list(LUser, LServer, Name),
-			     {selected, [{I}]} =
-				 get_privacy_list_id_t(LUser, LServer, Name),
-			     I;
-			 {selected, [{I}]} -> I
-		     end,
-		set_privacy_list(ID, RItems)
+    F = fun() ->
+	{ID, New} = case get_privacy_list_id_t(LUser, LServer, Name) of
+			{selected, []} ->
+			    add_privacy_list(LUser, LServer, Name),
+			    {selected, [{I}]} =
+			    get_privacy_list_id_t(LUser, LServer, Name),
+			    {I, true};
+			{selected, [{I}]} -> {I, false}
+		    end,
+	case New of
+	    false ->
+		set_privacy_list(ID, RItems);
+	    _ ->
+		set_privacy_list_new(ID, RItems)
+	end
 	end,
     transaction(LServer, F).
 
@@ -402,22 +457,59 @@ add_privacy_list(LUser, LServer, Name) ->
           "server_host=%(LServer)s",
           "name=%(Name)s"])).
 
-set_privacy_list(ID, RItems) ->
-    ejabberd_sql:sql_query_t(
-      ?SQL("delete from privacy_list_data where id=%(ID)d")),
+set_privacy_list_new(ID, RItems) ->
     lists:foreach(
-      fun({SType, SValue, SAction, Order, MatchAll, MatchIQ,
-           MatchMessage, MatchPresenceIn, MatchPresenceOut}) ->
-              ejabberd_sql:sql_query_t(
-                ?SQL("insert into privacy_list_data(id, t, "
-                     "value, action, ord, match_all, match_iq, "
-                     "match_message, match_presence_in, match_presence_out) "
-                     "values (%(ID)d, %(SType)s, %(SValue)s, %(SAction)s,"
-                     " %(Order)d, %(MatchAll)b, %(MatchIQ)b,"
-                     " %(MatchMessage)b, %(MatchPresenceIn)b,"
-                     " %(MatchPresenceOut)b)"))
-		  end,
-		  RItems).
+	fun({SType, SValue, SAction, Order, MatchAll, MatchIQ,
+	     MatchMessage, MatchPresenceIn, MatchPresenceOut}) ->
+	    ejabberd_sql:sql_query_t(
+		?SQL("insert into privacy_list_data(id, t, "
+		     "value, action, ord, match_all, match_iq, "
+		     "match_message, match_presence_in, match_presence_out) "
+		     "values (%(ID)d, %(SType)s, %(SValue)s, %(SAction)s,"
+		     " %(Order)d, %(MatchAll)b, %(MatchIQ)b,"
+		     " %(MatchMessage)b, %(MatchPresenceIn)b,"
+		     " %(MatchPresenceOut)b)"))
+	end,
+	RItems).
+
+calculate_difference(List1, List2) ->
+    Set1 = gb_sets:from_list(List1),
+    Set2 = gb_sets:from_list(List2),
+    {gb_sets:to_list(gb_sets:subtract(Set1, Set2)),
+     gb_sets:to_list(gb_sets:subtract(Set2, Set1))}.
+
+set_privacy_list(ID, RItems) ->
+    case ejabberd_sql:sql_query_t(
+	?SQL("select @(t)s, @(value)s, @(action)s, @(ord)d, @(match_all)b, "
+	     "@(match_iq)b, @(match_message)b, @(match_presence_in)b, "
+	     "@(match_presence_out)b from privacy_list_data "
+	     "where id=%(ID)d")) of
+	{selected, ExistingItems} ->
+	    {ToAdd2, ToDelete2} = calculate_difference(RItems, ExistingItems),
+	    ToAdd3 = if
+			 ToDelete2 /= [] ->
+			     ejabberd_sql:sql_query_t(
+				 ?SQL("delete from privacy_list_data where id=%(ID)d")),
+			     RItems;
+			 true ->
+			     ToAdd2
+		     end,
+	    lists:foreach(
+		fun({SType, SValue, SAction, Order, MatchAll, MatchIQ,
+		     MatchMessage, MatchPresenceIn, MatchPresenceOut}) ->
+		    ejabberd_sql:sql_query_t(
+			?SQL("insert into privacy_list_data(id, t, "
+			     "value, action, ord, match_all, match_iq, "
+			     "match_message, match_presence_in, match_presence_out) "
+			     "values (%(ID)d, %(SType)s, %(SValue)s, %(SAction)s,"
+			     " %(Order)d, %(MatchAll)b, %(MatchIQ)b,"
+			     " %(MatchMessage)b, %(MatchPresenceIn)b,"
+			     " %(MatchPresenceOut)b)"))
+		end,
+		ToAdd3);
+	Err ->
+	    Err
+    end.
 
 del_privacy_lists(LUser, LServer) ->
     case ejabberd_sql:sql_query(

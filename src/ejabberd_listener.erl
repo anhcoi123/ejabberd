@@ -5,7 +5,7 @@
 %%% Created : 16 Nov 2002 by Alexey Shchepin <alexey@process-one.net>
 %%%
 %%%
-%%% ejabberd, Copyright (C) 2002-2022   ProcessOne
+%%% ejabberd, Copyright (C) 2002-2025   ProcessOne
 %%%
 %%% This program is free software; you can redistribute it and/or
 %%% modify it under the terms of the GNU General Public License as
@@ -60,8 +60,6 @@
 
 -optional_callbacks([listen_opt_type/1, tcp_init/2, udp_init/2]).
 
--define(TCP_SEND_TIMEOUT, 15000).
-
 start_link() ->
     supervisor:start_link({local, ?MODULE}, ?MODULE, []).
 
@@ -108,6 +106,7 @@ init({Port, _, udp} = EndPoint, Module, Opts, SockOpts) ->
     {Port2, ExtraOpts} = case Port of
 			     <<"unix:", Path/binary>> ->
 				 SO = lists:keydelete(ip, 1, SockOpts),
+                                 setup_provisional_udsocket_dir(Path),
 				 file:delete(Path),
 				 {0, [{ip, {local, Path}} | SO]};
 			     _ ->
@@ -119,6 +118,8 @@ init({Port, _, udp} = EndPoint, Module, Opts, SockOpts) ->
 			     {reuseaddr, true} |
 			     ExtraOpts2]) of
 	{ok, Socket} ->
+            set_definitive_udsocket(Port, Opts),
+            misc:set_proc_label({?MODULE, udp, Port}),
 	    case inet:sockname(Socket) of
 		{ok, {Addr, Port1}} ->
 		    proc_lib:init_ack({ok, self()}),
@@ -149,9 +150,11 @@ init({Port, _, udp} = EndPoint, Module, Opts, SockOpts) ->
 init({Port, _, tcp} = EndPoint, Module, Opts, SockOpts) ->
     case listen_tcp(Port, SockOpts) of
 	{ok, ListenSocket} ->
+            set_definitive_udsocket(Port, Opts),
 	    case inet:sockname(ListenSocket) of
 		{ok, {Addr, Port1}} ->
 		    proc_lib:init_ack({ok, self()}),
+                    misc:set_proc_label({?MODULE, tcp, Port}),
 		    case application:ensure_started(ejabberd) of
 			ok ->
 			    Sup = start_module_sup(Module, Opts),
@@ -186,8 +189,10 @@ listen_tcp(Port, SockOpts) ->
     {Port2, ExtraOpts} = case Port of
 			     <<"unix:", Path/binary>> ->
 				 SO = lists:keydelete(ip, 1, SockOpts),
+                                 Prov = setup_provisional_udsocket_dir(Path),
 				 file:delete(Path),
-				 {0, [{ip, {local, Path}} | SO]};
+				 file:delete(Prov),
+				 {0, [{ip, {local, Prov}} | SO]};
 			     _ ->
 				 {Port, SockOpts}
 			 end,
@@ -204,6 +209,89 @@ listen_tcp(Port, SockOpts) ->
 	{error, _} = Err ->
 	    Err
     end.
+
+%%%
+%%% Unix Domain Socket utility functions
+%%%
+
+setup_provisional_udsocket_dir(DefinitivePath) ->
+    ProvisionalPath = get_provisional_udsocket_path(DefinitivePath),
+    ?DEBUG("Creating a Unix Domain Socket provisional file at ~ts for the definitive path ~s",
+              [ProvisionalPath, DefinitivePath]),
+    ProvisionalPath.
+
+get_provisional_udsocket_path(Path) ->
+    PathBase64 = misc:term_to_base64(Path),
+    PathBuild = filename:join(os:getenv("HOME"), PathBase64),
+    %% Shorthen the path, a long path produces a crash when opening the socket.
+    binary:part(PathBuild, {0, erlang:min(107, byte_size(PathBuild))}).
+
+get_definitive_udsocket_path(<<"unix", _>> = Unix) ->
+    Unix;
+get_definitive_udsocket_path(ProvisionalPath) ->
+    PathBase64 = filename:basename(ProvisionalPath),
+    {term, Path} = misc:base64_to_term(PathBase64),
+    relative_socket_to_mnesia(Path).
+
+set_definitive_udsocket(<<"unix:", Path/binary>>, Opts) ->
+    Prov = get_provisional_udsocket_path(Path),
+    Usd = maps:get(unix_socket, Opts),
+    case maps:get(mode, Usd, undefined) of
+        undefined -> ok;
+        Mode -> ok = file:change_mode(Prov, Mode)
+    end,
+    case maps:get(owner, Usd, undefined) of
+        undefined -> ok;
+        Owner ->
+            try
+                ok = file:change_owner(Prov, Owner)
+            catch
+                error:{badmatch, {error, eperm}} ->
+                    ?ERROR_MSG("Error trying to set owner ~p for socket ~p", [Owner, Prov]),
+                    throw({error_setting_socket_owner, Owner, Prov})
+            end
+    end,
+    case maps:get(group, Usd, undefined) of
+        undefined -> ok;
+        Group ->
+            try
+                ok = file:change_group(Prov, Group)
+            catch
+                error:{badmatch, {error, eperm}} ->
+                    ?ERROR_MSG("Error trying to set group ~p for socket ~p", [Group, Prov]),
+                    throw({error_setting_socket_group, Group, Prov})
+            end
+    end,
+    FinalPath = relative_socket_to_mnesia(Path),
+    FinalPathDir = filename:dirname(FinalPath),
+    case file:make_dir(FinalPathDir) of
+        ok ->
+            file:change_mode(FinalPathDir, 8#00700);
+        _ ->
+            ok
+    end,
+    file:rename(Prov, FinalPath);
+set_definitive_udsocket(_Port, _Opts) ->
+    ok.
+
+relative_socket_to_mnesia(Path1) ->
+    case filename:pathtype(Path1) of
+        absolute ->
+            Path1;
+        relative ->
+            MnesiaDir = mnesia:system_info(directory),
+            filename:join(MnesiaDir, Path1)
+    end.
+
+maybe_delete_udsocket_file(<<"unix:", Path/binary>>) ->
+    PathAbsolute = relative_socket_to_mnesia(Path),
+    file:delete(PathAbsolute);
+maybe_delete_udsocket_file(_Port) ->
+    ok.
+
+%%%
+%%%
+%%%
 
 -spec split_opts(transport(), opts()) -> {opts(), [gen_tcp:option()]}.
 split_opts(Transport, Opts) ->
@@ -270,11 +358,20 @@ accept(ListenSocket, Module, State, Sup, Interval, Proxy, Arity) ->
 				       gen_tcp:close(Socket),
 				       none
 			       end,
-		    ?INFO_MSG("(~p) Accepted connection ~ts -> ~ts",
-			      [Receiver,
-			       ejabberd_config:may_hide_data(
-				 format_endpoint({PPort, PAddr, tcp})),
-			       format_endpoint({Port, Addr, tcp})]);
+                    case is_ctl_over_http(State) of
+                        false ->
+                            ?INFO_MSG("(~p) Accepted connection ~ts -> ~ts",
+                                      [Receiver,
+                                       ejabberd_config:may_hide_data(
+                                         format_endpoint({PPort, PAddr, tcp})),
+                                       format_endpoint({Port, Addr, tcp})]);
+                        true ->
+                            ?DEBUG("(~p) Accepted connection ~ts -> ~ts",
+                                      [Receiver,
+                                       ejabberd_config:may_hide_data(
+                                         format_endpoint({PPort, PAddr, tcp})),
+                                       format_endpoint({Port, Addr, tcp})])
+                    end;
 		_ ->
 		    gen_tcp:close(Socket)
 	    end,
@@ -283,6 +380,16 @@ accept(ListenSocket, Module, State, Sup, Interval, Proxy, Arity) ->
 	    ?ERROR_MSG("(~w) Failed TCP accept: ~ts",
 		       [ListenSocket, format_error(Reason)]),
 	    accept(ListenSocket, Module, State, Sup, NewInterval, Proxy, Arity)
+    end.
+
+is_ctl_over_http(State) ->
+    case lists:keyfind(request_handlers, 1, State) of
+        {request_handlers, Handlers} ->
+           case lists:keyfind(ejabberd_ctl, 2, Handlers) of
+               {_, ejabberd_ctl} -> true;
+               _ -> false
+           end;
+        _ -> false
     end.
 
 -spec udp_recv(inet:socket(), module(), state()) -> no_return().
@@ -318,6 +425,9 @@ start_connection(Module, Arity, Socket, State, Sup) ->
 		  supervisor:start_child(Sup, [{gen_tcp, Socket}, State])
 	  end,
     case Res of
+	{ok, Pid, preowned_socket} ->
+	    Module:accept(Pid),
+	    {ok, Pid};
 	{ok, Pid} ->
 	    case gen_tcp:controlling_process(Socket, Pid) of
 		ok ->
@@ -396,12 +506,13 @@ stop_listeners() ->
       Ports).
 
 -spec stop_listener(endpoint(), module(), opts()) -> ok | {error, any()}.
-stop_listener({_, _, Transport} = EndPoint, Module, Opts) ->
+stop_listener({Port, _, Transport} = EndPoint, Module, Opts) ->
     case supervisor:terminate_child(?MODULE, EndPoint) of
 	ok ->
 	    ?INFO_MSG("Stop accepting ~ts connections at ~ts for ~p",
 		      [format_transport(Transport, Opts),
 		       format_endpoint(EndPoint), Module]),
+	    maybe_delete_udsocket_file(Port),
 	    ets:delete(?MODULE, EndPoint),
 	    supervisor:delete_child(?MODULE, EndPoint);
 	Err ->
@@ -488,10 +599,15 @@ format_error(Reason) ->
     end.
 
 -spec format_endpoint(endpoint()) -> string().
-format_endpoint({Port, IP, _Transport}) ->
+format_endpoint({Port, IP, Transport}) ->
     case Port of
+        <<"unix:", _/binary>> ->
+            Port;
+        <<>> when (IP == local) and (Transport == tcp) ->
+            "local-unix-socket-domain";
 	Unix when is_binary(Unix) ->
-	    <<"unix:", Unix/binary>>;
+            Def = get_definitive_udsocket_path(Unix),
+            <<"unix:", Def/binary>>;
 	_ ->
 	    IPStr = case tuple_size(IP) of
 			4 -> inet:ntoa(IP);
@@ -561,13 +677,21 @@ validator(M, T) ->
 		    true ->
 			 []
 		 end,
+    Keywords = ejabberd_config:get_defined_keywords(global) ++ ejabberd_config:get_predefined_keywords(global),
     Validator = maps:from_list(
 		  lists:map(
 		    fun(Opt) ->
-			    try {Opt, M:listen_opt_type(Opt)}
+			    Type = try M:listen_opt_type(Opt)
 			    catch _:_ when M /= ?MODULE ->
-				    {Opt, listen_opt_type(Opt)}
-			    end
+				    listen_opt_type(Opt)
+			    end,
+			    TypeProcessed =
+			        econf:and_then(
+			             fun(B) ->
+			                 ejabberd_config:replace_keywords(global, B, Keywords)
+			             end,
+			             Type),
+			    {Opt, TypeProcessed}
 		    end, proplists:get_keys(Options))),
     econf:options(
       Validator,
@@ -696,6 +820,12 @@ listen_opt_type(shaper) ->
     econf:shaper();
 listen_opt_type(access) ->
     econf:acl();
+listen_opt_type(unix_socket) ->
+    econf:options(
+      #{group => econf:non_neg_int(),
+       owner => econf:non_neg_int(),
+       mode => econf:octal()},
+      [unique, {return, map}]);
 listen_opt_type(use_proxy_protocol) ->
     econf:bool().
 
@@ -705,6 +835,7 @@ listen_options() ->
      {ip, {0,0,0,0}},
      {accept_interval, 0},
      {send_timeout, 15000},
-     {backlog, 5},
+     {backlog, 128},
+     {unix_socket, #{}},
      {use_proxy_protocol, false},
      {supervisor, true}].

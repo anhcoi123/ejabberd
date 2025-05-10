@@ -5,7 +5,7 @@
 %%% Created : 23 Sep 2010 by Ahmed Omar
 %%%
 %%%
-%%% ejabberd, Copyright (C) 2002-2022   ProcessOne
+%%% ejabberd, Copyright (C) 2002-2025   ProcessOne
 %%%
 %%% This program is free software; you can redistribute it and/or
 %%% modify it under the terms of the GNU General Public License as
@@ -37,14 +37,10 @@
 -record(pres_counter,
 	{dir, start, count, logged = false}).
 
-start(Host, _Opts) ->
-    ejabberd_hooks:add(privacy_check_packet, Host, ?MODULE,
-		       check_packet, 25),
-    ok.
+start(_Host, _Opts) ->
+    {ok, [{hook, privacy_check_packet, check_packet, 25}]}.
 
-stop(Host) ->
-    ejabberd_hooks:delete(privacy_check_packet, Host,
-			  ?MODULE, check_packet, 25),
+stop(_Host) ->
     ok.
 
 reload(_Host, _NewOpts, _OldOpts) ->
@@ -154,8 +150,6 @@ mod_doc() ->
                   ?T("The time interval. The default value is '1' minute.")}}],
       example =>
           ["modules:",
-           "  ...",
            "  mod_pres_counter:",
            "    count: 5",
-           "    interval: 30 secs",
-           "  ..."]}.
+           "    interval: 30 secs"]}.

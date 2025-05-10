@@ -67,7 +67,7 @@ rel_vsn=$(git describe --tags | sed -e 's/-g.*//' -e 's/-/./' | tr -d '[:space:]
 home_url='https://www.ejabberd.im'
 doc_url='https://docs.ejabberd.im'
 upgrade_url="$doc_url/admin/upgrade/#specific-version-upgrade-notes"
-admin_url="$doc_url/admin/installation/#administration-account"
+admin_url="$doc_url/admin/install/next-steps/#administration-account"
 default_code_dir="/opt/$rel_name-$rel_vsn"
 default_data_dir="/opt/$rel_name"
 tmp_dir=$(mktemp -d "/tmp/.$rel_name.XXXXXX")
@@ -80,7 +80,7 @@ create_help_file()
 	local file="$1"
 
 	cat >"$file" <<-EOF
-	This is the $rel_name $rel_vsn-$iteration installer for linux-$arch
+	This is the $rel_name $rel_vsn-$iteration installer for linux-gnu-$arch
 	
 	Visit:
 	  $home_url
@@ -247,7 +247,6 @@ create_setup_script()
 	if [ "\$code_dir" != '$default_code_dir' ]
 	then
 		sed -i "s|$default_code_dir|\$code_dir|g" \
-		    "\$code_dir/bin/${rel_name}ctl" \
 		    "\$code_dir/bin/$rel_name.init" \
 		    "\$code_dir/bin/$rel_name.service"
 	fi
@@ -255,8 +254,6 @@ create_setup_script()
 	then
 		sed -i "s|$default_data_dir|\$data_dir|g" \
 		    "\$code_dir/bin/${rel_name}ctl" \
-		    "\$code_dir/bin/$rel_name.init" \
-		    "\$code_dir/bin/$rel_name.service" \
 		    "\$data_dir/conf/$rel_name.yml" \
 		    "\$data_dir/conf/${rel_name}ctl.cfg"
 	fi
@@ -354,7 +351,7 @@ create_setup_script()
 
 for arch in $architectures
 do
-	tar_name="$rel_name-$rel_vsn-linux-$arch.tar.gz"
+	tar_name="$rel_name-$rel_vsn-linux-gnu-$arch.tar.gz"
 	installer_name="$rel_name-$rel_vsn-$iteration-linux-$arch.run"
 
 	test -e "$tar_name" || tools/make-binaries

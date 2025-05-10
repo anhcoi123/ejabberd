@@ -5,7 +5,7 @@
 %%% Created : 17 Feb 2006 by Mickael Remond <mremond@process-one.net>
 %%%
 %%%
-%%% ejabberd, Copyright (C) 2002-2022   ProcessOne
+%%% ejabberd, Copyright (C) 2002-2025   ProcessOne
 %%%
 %%% This program is free software; you can redistribute it and/or
 %%% modify it under the terms of the GNU General Public License as
@@ -27,6 +27,8 @@
 
 -behaviour(ejabberd_auth).
 -author('mickael.remond@process-one.net').
+
+-protocol({xep, 175, '1.2', '1.1.0', "complete", ""}).
 
 -export([start/1,
 	 stop/1,
@@ -153,7 +155,7 @@ check_password(User, _AuthzId, Server, _Password) ->
 	 %% If user exists in other module, reject anonnymous authentication
 	 true -> false;
 	 %% If we are not sure whether the user exists in other module, reject anon auth
-	 maybe -> false;
+	 maybe_exists -> false;
 	 false -> login(User, Server)
      end}.
 

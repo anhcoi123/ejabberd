@@ -1,11 +1,11 @@
 %%%----------------------------------------------------------------------
 %%% File    : mod_push_sql.erl
 %%% Author  : Evgeniy Khramtsov <ekhramtsov@process-one.net>
-%%% Purpose : 
+%%% Purpose :
 %%% Created : 26 Oct 2017 by Evgeny Khramtsov <ekhramtsov@process-one.net>
 %%%
 %%%
-%%% ejabberd, Copyright (C) 2017-2022   ProcessOne
+%%% ejabberd, Copyright (C) 2017-2025   ProcessOne
 %%%
 %%% This program is free software; you can redistribute it and/or
 %%% modify it under the terms of the GNU General Public License as
@@ -30,6 +30,7 @@
 -export([init/2, store_session/6, lookup_session/4, lookup_session/3,
 	 lookup_sessions/3, lookup_sessions/2, lookup_sessions/1,
 	 delete_session/3, delete_old_sessions/2, export/1]).
+-export([sql_schemas/0]).
 
 -include_lib("xmpp/include/xmpp.hrl").
 -include("logger.hrl").
@@ -39,8 +40,31 @@
 %%%===================================================================
 %%% API
 %%%===================================================================
-init(_Host, _Opts) ->
+init(Host, _Opts) ->
+    ejabberd_sql_schema:update_schema(Host, ?MODULE, sql_schemas()),
     ok.
+
+sql_schemas() ->
+    [#sql_schema{
+        version = 1,
+        tables =
+            [#sql_table{
+                name = <<"push_session">>,
+                columns =
+                    [#sql_column{name = <<"username">>, type = text},
+                     #sql_column{name = <<"server_host">>, type = text},
+                     #sql_column{name = <<"timestamp">>, type = bigint},
+                     #sql_column{name = <<"service">>, type = text},
+                     #sql_column{name = <<"node">>, type = text},
+                     #sql_column{name = <<"xml">>, type = text}],
+                indices = [#sql_index{
+                              columns = [<<"server_host">>, <<"username">>,
+                                         <<"timestamp">>],
+                              unique = true},
+                           #sql_index{
+                              columns = [<<"server_host">>, <<"username">>,
+                                         <<"service">>, <<"node">>],
+                              unique = true}]}]}].
 
 store_session(LUser, LServer, NowTS, PushJID, Node, XData) ->
     XML = encode_xdata(XData),

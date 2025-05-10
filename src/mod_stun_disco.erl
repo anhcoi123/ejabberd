@@ -5,7 +5,7 @@
 %%% Created : 18 Apr 2020 by Holger Weiss <holger@zedat.fu-berlin.de>
 %%%
 %%%
-%%% ejabberd, Copyright (C) 2020-2022   ProcessOne
+%%% ejabberd, Copyright (C) 2020-2025   ProcessOne
 %%%
 %%% This program is free software; you can redistribute it and/or
 %%% modify it under the terms of the GNU General Public License as
@@ -25,7 +25,7 @@
 
 -module(mod_stun_disco).
 -author('holger@zedat.fu-berlin.de').
--protocol({xep, 215, '0.7'}).
+-protocol({xep, 215, '0.7', '20.04', "complete", ""}).
 
 -behaviour(gen_server).
 -behaviour(gen_mod).
@@ -159,8 +159,8 @@ mod_doc() ->
 	  ?T("This module allows XMPP clients to discover STUN/TURN services "
 	     "and to obtain temporary credentials for using them as per "
 	     "https://xmpp.org/extensions/xep-0215.html"
-	     "[XEP-0215: External Service Discovery]. "
-	     "This module is included in ejabberd since version 20.04."),
+	     "[XEP-0215: External Service Discovery]."),
+      note => "added in 20.04",
       opts =>
 	  [{access,
 	    #{value => ?T("AccessName"),
@@ -484,13 +484,15 @@ process_iq(#iq{lang = Lang} = IQ) ->
 
 -spec process_iq_get(iq(), request()) -> iq().
 process_iq_get(#iq{from = From, to = #jid{lserver = Host}, lang = Lang} = IQ,
-	       Request) ->
+	       #request{restricted = Restricted} = Request) ->
     Access = mod_stun_disco_opt:access(Host),
     case acl:match_rule(Host, Access, From) of
         allow ->
 	    ?DEBUG("Performing external service discovery for ~ts",
 		   [jid:encode(From)]),
 	    case get_services(Host, From, Request) of
+		{ok, Services} when Restricted -> % A <credentials/> request.
+		    xmpp:make_iq_result(IQ, #credentials{services = Services});
 		{ok, Services} ->
 		    xmpp:make_iq_result(IQ, #services{list = Services});
 		{error, timeout} -> % Has been logged already.

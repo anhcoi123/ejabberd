@@ -3,7 +3,7 @@
 %%% Purpose : Validator for ejabberd configuration options
 %%%
 %%%
-%%% ejabberd, Copyright (C) 2002-2022   ProcessOne
+%%% ejabberd, Copyright (C) 2002-2025   ProcessOne
 %%%
 %%% This program is free software; you can redistribute it and/or
 %%% modify it under the terms of the GNU General Public License as
@@ -197,6 +197,11 @@ format_error(eimp_error) ->
     format("ejabberd is built without image converter support", []);
 format_error({mqtt_codec, Reason}) ->
     mqtt_codec:format_error(Reason);
+format_error({external_module_error, Module, Error}) ->
+    try Module:format_error(Error)
+    catch _:_ ->
+	format("Invalid value", [])
+    end;
 format_error(Reason) ->
     yconf:format_error(Reason).
 
@@ -500,10 +505,15 @@ db_type(M) ->
     and_then(
       atom(),
       fun(T) ->
-	      case code:ensure_loaded(db_module(M, T)) of
-		  {module, _} -> T;
-		  {error, _} -> fail({bad_db_type, M, T})
-	      end
+        case code:ensure_loaded(db_module(M, T)) of
+          {module, _} -> T;
+          {error, _} ->
+            ElixirModule = "Elixir." ++ atom_to_list(T),
+            case code:ensure_loaded(list_to_atom(ElixirModule)) of
+              {module, _} -> list_to_atom(ElixirModule);
+              {error, _} -> fail({bad_db_type, M, T})
+            end
+          end
       end).
 
 -spec queue_type() -> yconf:validator(ram | file).
@@ -536,13 +546,10 @@ sip_uri() ->
 -spec host() -> yconf:validator(binary()).
 host() ->
     fun(Domain) ->
-	    Host = ejabberd_config:get_myname(),
 	    Hosts = ejabberd_config:get_option(hosts),
-	    Domain1 = (binary())(Domain),
-	    Domain2 = misc:expand_keyword(<<"@HOST@">>, Domain1, Host),
-	    Domain3 = (domain())(Domain2),
+	    Domain3 = (domain())(Domain),
 	    case lists:member(Domain3, Hosts) of
-		true -> fail({route_conflict, Domain3});
+		true -> fail({route_conflict, Domain});
 		false -> Domain3
 	    end
     end.

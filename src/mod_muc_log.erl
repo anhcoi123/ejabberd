@@ -1,11 +1,11 @@
 %%%----------------------------------------------------------------------
 %%% File    : mod_muc_log.erl
-%%% Author  : Badlop@process-one.net
+%%% Author  : Badlop <badlop@process-one.net>
 %%% Purpose : MUC room logging
 %%% Created : 12 Mar 2006 by Alexey Shchepin <alexey@process-one.net>
 %%%
 %%%
-%%% ejabberd, Copyright (C) 2002-2022   ProcessOne
+%%% ejabberd, Copyright (C) 2002-2025   ProcessOne
 %%%
 %%% This program is free software; you can redistribute it and/or
 %%% modify it under the terms of the GNU General Public License as
@@ -25,7 +25,7 @@
 
 -module(mod_muc_log).
 
--protocol({xep, 334, '0.2'}).
+-protocol({xep, 334, '0.2', '15.09', "complete", ""}).
 
 -author('badlop@process-one.net').
 
@@ -34,8 +34,8 @@
 -behaviour(gen_mod).
 
 %% API
--export([start/2, stop/1, reload/3, get_url/1,
-	 check_access_log/2, add_to_log/5]).
+-export([start/2, stop/1, reload/3, get_url/2,
+	 check_access_log/3, add_to_log/5]).
 
 -export([init/1, handle_call/3, handle_cast/2,
 	 handle_info/2, terminate/2, code_change/3,
@@ -82,7 +82,9 @@ add_to_log(Host, Type, Data, Room, Opts) ->
     gen_server:cast(get_proc_name(Host),
 		    {add_to_log, Type, Data, Room, Opts}).
 
-check_access_log(Host, From) ->
+check_access_log(allow, _Host, _From) ->
+    allow;
+check_access_log(_Acc, Host, From) ->
     case catch gen_server:call(get_proc_name(Host),
 			       {check_access_log, Host, From})
 	of
@@ -90,16 +92,18 @@ check_access_log(Host, From) ->
       Res -> Res
     end.
 
--spec get_url(#state{}) -> {ok, binary()} | error.
-get_url(#state{room = Room, host = Host, server_host = ServerHost}) ->
+-spec get_url(any(), #state{}) -> {ok, binary()} | error.
+get_url({ok, _} = Acc, _State) ->
+    Acc;
+get_url(_Acc, #state{room = Room, host = Host, server_host = ServerHost}) ->
     try mod_muc_log_opt:url(ServerHost) of
 	undefined -> error;
 	URL ->
 	    case mod_muc_log_opt:dirname(ServerHost) of
 		room_jid ->
-		    {ok, <<URL/binary, $/, Room/binary, $@, Host/binary>>};
+		    {ok, <<URL/binary, $/, Room/binary, $@, Host/binary, $/>>};
 		room_name ->
-		    {ok, <<URL/binary, $/, Room/binary>>}
+		    {ok, <<URL/binary, $/, Room/binary, $/>>}
 	    end
     catch
 	error:{module_not_loaded, _, _} ->
@@ -115,6 +119,9 @@ depends(_Host, _Opts) ->
 init([Host|_]) ->
     process_flag(trap_exit, true),
     Opts = gen_mod:get_module_opts(Host, ?MODULE),
+    ejabberd_hooks:add(muc_log_add, Host, ?MODULE, add_to_log, 100),
+    ejabberd_hooks:add(muc_log_check_access_log, Host, ?MODULE, check_access_log, 100),
+    ejabberd_hooks:add(muc_log_get_url, Host, ?MODULE, get_url, 100),
     {ok, init_state(Host, Opts)}.
 
 handle_call({check_access_log, ServerHost, FromJID}, _From, State) ->
@@ -137,7 +144,11 @@ handle_cast(Msg, State) ->
 
 handle_info(_Info, State) -> {noreply, State}.
 
-terminate(_Reason, _State) -> ok.
+terminate(_Reason, #state{host = Host}) ->
+    ejabberd_hooks:delete(muc_log_add, Host, ?MODULE, add_to_log, 100),
+    ejabberd_hooks:delete(muc_log_check_access_log, Host, ?MODULE, check_access_log, 100),
+    ejabberd_hooks:delete(muc_log_get_url, Host, ?MODULE, get_url, 100),
+    ok.
 
 code_change(_OldVsn, State, _Extra) -> {ok, State}.
 
@@ -443,11 +454,13 @@ add_message_to_log(Nick1, Message, RoomJID, Opts,
     {_, _, Microsecs} = Now,
     STimeUnique = io_lib:format("~ts.~w",
 				[STime, Microsecs]),
+    maybe_print_jl(open, F, Message, FileFormat),
     fw(F, io_lib:format("<a id=\"~ts\" name=\"~ts\" href=\"#~ts\" "
                        "class=\"ts\">[~ts]</a> ",
                        [STimeUnique, STimeUnique, STimeUnique, STime])
 	 ++ Text,
        FileFormat),
+    maybe_print_jl(close, F, Message, FileFormat),
     file:close(F),
     ok.
 
@@ -583,7 +596,7 @@ put_header(F, Room, Date, CSSFile, Lang, Hour_offset,
 	 "class=\"nav\" href=\"~ts\">&gt;</a></span></di"
 	 "v>">>,
        [Date, Date_prev, Date_next]),
-    case {htmlize(Room#room.subject_author),
+    case {htmlize(prepare_subject_author(Room#room.subject_author)),
 	  htmlize(Room#room.subject)}
 	of
       {<<"">>, <<"">>} -> ok;
@@ -598,6 +611,7 @@ put_header(F, Room, Date, CSSFile, Lang, Hour_offset,
     RoomOccupants = roomoccupants_to_string(Occupants,
 					    FileFormat),
     put_room_occupants(F, RoomOccupants, Lang, FileFormat),
+    put_occupants_join_leave(F, Lang),
     Time_offset_str = case Hour_offset < 0 of
 			true -> io_lib:format("~p", [Hour_offset]);
 			false -> io_lib:format("+~p", [Hour_offset])
@@ -662,6 +676,35 @@ put_room_occupants(F, RoomOccupants, Lang,
 	 "y: none;\" ><br/>~ts</div>">>,
        [Now2, RoomOccupants]),
     fw(F, <<"</div>">>).
+
+put_occupants_join_leave(F, Lang) ->
+    fw(F, <<"<div class=\"rc\">">>),
+    fw(F,
+       <<"<div class=\"rct\" onclick=\"jlf();return "
+	 "false;\">~ts</div>">>,
+       [tr(Lang, ?T("Show Occupants Join/Leave"))]),
+    fw(F, <<"</div>">>).
+
+maybe_print_jl(_Direction, _F, _Message, plaintext) ->
+    ok;
+maybe_print_jl(Direction, F, Message, html) ->
+    PrintJl = case Message of
+        join -> true;
+        leave -> true;
+        {leave, _} -> true;
+        _ -> false
+    end,
+    case PrintJl of
+        true -> print_jl(Direction, F);
+        false -> ok
+    end.
+
+print_jl(Direction, F) ->
+    String = case Direction of
+                 open -> "<div class=\"jl\">";
+                 close -> "</div>"
+             end,
+    fw(F, io_lib:format(String, [])).
 
 htmlize(S1) -> htmlize(S1, html).
 
@@ -783,6 +826,12 @@ roomconfig_to_string(Options, Lang, FileFormat) ->
 						 (htmlize(tr(Lang, misc:atom_to_binary(T)),
 							  FileFormat))/binary,
 						 "\"</div>">>;
+					   allowpm ->
+					       <<"<div class=\"rcot\">",
+						 OptText/binary, ": \"",
+						 (htmlize(tr(Lang, misc:atom_to_binary(T)),
+							  FileFormat))/binary,
+						 "\"</div>">>;
 					   _ -> <<"\"", T/binary, "\"">>
 					 end
 				   end,
@@ -811,8 +860,8 @@ get_roomconfig_text(members_by_default, Lang) ->
     tr(Lang, ?T("Default users as participants"));
 get_roomconfig_text(allow_change_subj, Lang) ->
     tr(Lang, ?T("Allow users to change the subject"));
-get_roomconfig_text(allow_private_messages, Lang) ->
-    tr(Lang, ?T("Allow users to send private messages"));
+get_roomconfig_text(allowpm, Lang) ->
+    tr(Lang, ?T("Who can send private messages"));
 get_roomconfig_text(allow_private_messages_from_visitors, Lang) ->
     tr(Lang, ?T("Allow visitors to send private messages to"));
 get_roomconfig_text(allow_query_users, Lang) ->
@@ -897,6 +946,11 @@ get_room_occupants(RoomJIDString) ->
 	error ->
 	    []
     end.
+
+prepare_subject_author({Nick, _}) ->
+    Nick;
+prepare_subject_author(SA) ->
+    SA.
 
 -spec get_room_state(binary(), binary()) -> {ok, mod_muc_room:state()} | error.
 
@@ -1043,7 +1097,7 @@ mod_doc() ->
            {dirname,
             #{value => "room_jid | room_name",
               desc =>
-                  ?T("Allows to configure the name of the room directory. "
+                  ?T("Configure the name of the room directory. "
                      "If set to 'room_jid', the room directory name will "
                      "be the full room JID. Otherwise, the room directory "
                      "name will be only the room name, not including the "

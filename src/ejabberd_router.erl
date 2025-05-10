@@ -5,7 +5,7 @@
 %%% Created : 27 Nov 2002 by Alexey Shchepin <alexey@process-one.net>
 %%%
 %%%
-%%% ejabberd, Copyright (C) 2002-2022   ProcessOne
+%%% ejabberd, Copyright (C) 2002-2025   ProcessOne
 %%%
 %%% This program is free software; you can redistribute it and/or
 %%% modify it under the terms of the GNU General Public License as
@@ -380,8 +380,9 @@ code_change(_OldVsn, State, _Extra) ->
 %%% Internal functions
 %%--------------------------------------------------------------------
 -spec do_route(stanza()) -> ok.
-do_route(OrigPacket) ->
-    ?DEBUG("Route:~n~ts", [xmpp:pp(OrigPacket)]),
+do_route(OrigPacket1) ->
+    ?DEBUG("Route:~n~ts", [xmpp:pp(OrigPacket1)]),
+    OrigPacket = process_privilege_iq(OrigPacket1),
     case ejabberd_hooks:run_fold(filter_packet, OrigPacket, []) of
 	drop ->
 	    ok;
@@ -404,6 +405,22 @@ do_route(OrigPacket) ->
 		    ok
 	    end
     end.
+
+%% @format-begin
+process_privilege_iq(Packet) ->
+    Type = xmpp:get_type(Packet),
+    case xmpp:get_meta(Packet, privilege_iq, none) of
+        {OriginalId, OriginalHost, ReplacedJid} when (Type == result) or (Type == error) ->
+            Privilege = #privilege{forwarded = #forwarded{sub_els = [Packet]}},
+            #iq{type = xmpp:get_type(Packet),
+                id = OriginalId,
+                to = jid:make(OriginalHost),
+                from = ReplacedJid,
+                sub_els = [Privilege]};
+        _ ->
+            Packet
+    end.
+%% @format-end
 
 -spec do_route(stanza(), #route{}) -> any().
 do_route(Pkt, #route{local_hint = LocalHint,

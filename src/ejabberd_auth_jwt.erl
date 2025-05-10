@@ -5,7 +5,7 @@
 %%% Created : 16 Mar 2019 by Mickael Remond <mremond@process-one.net>
 %%%
 %%%
-%%% ejabberd, Copyright (C) 2002-2022   ProcessOne
+%%% ejabberd, Copyright (C) 2002-2025   ProcessOne
 %%%
 %%% This program is free software; you can redistribute it and/or
 %%% modify it under the terms of the GNU General Public License as
@@ -44,9 +44,9 @@
 %%%----------------------------------------------------------------------
 start(Host) ->
     %% We add our default JWT verifier with hook priority 100.
-    %% So if you need to check or verify your custom JWT before the 
-    %% default verifier, It's better to use this hook with priority 
-    %% little than 100 and return bool() or {stop, bool()} in your own 
+    %% So if you need to check or verify your custom JWT before the
+    %% default verifier, It's better to use this hook with priority
+    %% little than 100 and return bool() or {stop, bool()} in your own
     %% callback function.
     ejabberd_hooks:add(check_decoded_jwt, Host, ?MODULE, check_decoded_jwt, 100),
     case ejabberd_option:jwt_key(Host) of
@@ -146,6 +146,9 @@ check_jwt_token(User, Server, Token) ->
         {false, _, _} ->
             false
     catch
-        error:{badarg, _} ->
+        A:B ->
+            ?DEBUG("jose_jwt:verify failed ~n for account ~p@~p~n "
+                   " JWK and token: ~p~n with error: ~p",
+                   [User, Server, {JWK, Token}, {A, B}]),
             false
     end.

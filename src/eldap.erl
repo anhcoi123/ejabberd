@@ -605,10 +605,10 @@ init([Hosts, Port, Rootdn, Passwd, Opts]) ->
 				  []),
 		     CertOpts;
 		 Verify == soft ->
-		     [{verify, verify_peer}, {fail_if_no_peer_cert, false}] ++ CertOpts ++ CacertOpts ++ DepthOpts;
+		     [{verify, verify_peer}] ++ CertOpts ++ CacertOpts ++ DepthOpts;
 		 Verify == hard ->
-		     [{verify, verify_peer}, {fail_if_no_peer_cert, true}] ++ CertOpts ++ CacertOpts ++ DepthOpts;
-		 true -> []
+		     [{verify, verify_peer}] ++ CertOpts ++ CacertOpts ++ DepthOpts;
+		 true -> [{verify, verify_none}]
 	      end,
     {ok, connecting,
      #eldap{hosts = Hosts, port = PortTemp, rootdn = Rootdn,

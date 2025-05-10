@@ -1,6 +1,6 @@
 %%%----------------------------------------------------------------------
 %%%
-%%% ejabberd, Copyright (C) 2002-2022   ProcessOne
+%%% ejabberd, Copyright (C) 2002-2025   ProcessOne
 %%%
 %%% This program is free software; you can redistribute it and/or
 %%% modify it under the terms of the GNU General Public License as
@@ -24,7 +24,6 @@
 {debug, @debug@}.
 {new_sql_schema, @new_sql_schema@}.
 
-%% Ad-hoc directories with source files
 {tools, @tools@}.
 
 %% Dependencies
@@ -55,6 +54,7 @@
 {installuser, "@INSTALLUSER@"}.
 {erl, "{{erts_dir}}/bin/erl"}.
 {epmd, "{{erts_dir}}/bin/epmd"}.
+{iexpath, "{{release_dir}}/releases/{{vsn}}/iex"}.
 {localstatedir, "{{release_dir}}/var"}.
 {libdir, "{{release_dir}}/lib"}.
 {docdir, "{{release_dir}}/doc"}.

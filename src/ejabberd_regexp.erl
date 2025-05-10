@@ -1,11 +1,11 @@
 %%%----------------------------------------------------------------------
 %%% File    : ejabberd_regexp.erl
-%%% Author  : Badlop
+%%% Author  : Badlop <badlop@process-one.net>
 %%% Purpose : Frontend to Re OTP module
-%%% Created : 8 Dec 2011 by Badlop
+%%% Created : 8 Dec 2011 by Badlop <badlop@process-one.net>
 %%%
 %%%
-%%% ejabberd, Copyright (C) 2002-2022   ProcessOne
+%%% ejabberd, Copyright (C) 2002-2025   ProcessOne
 %%%
 %%% This program is free software; you can redistribute it and/or
 %%% modify it under the terms of the GNU General Public License as

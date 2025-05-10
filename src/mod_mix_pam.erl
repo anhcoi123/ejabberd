@@ -22,7 +22,7 @@
 %%%----------------------------------------------------------------------
 -module(mod_mix_pam).
 -behaviour(gen_mod).
--protocol({xep, 405, '0.3.0'}).
+-protocol({xep, 405, '0.3.0', '19.02', "complete", ""}).
 
 %% gen_mod callbacks
 -export([start/2, stop/1, reload/3, depends/2, mod_opt_type/1, mod_options/1]).
@@ -32,11 +32,13 @@
 	 disco_sm_features/5,
 	 remove_user/2,
 	 process_iq/1,
+	 get_mix_roster_items/2,
 	 webadmin_user/4,
-	 webadmin_page/3]).
+	 webadmin_menu_hostuser/4, webadmin_page_hostuser/4]).
 
 -include_lib("xmpp/include/xmpp.hrl").
 -include("logger.hrl").
+-include("mod_roster.hrl").
 -include("translate.hrl").
 -include("ejabberd_http.hrl").
 -include("ejabberd_web_admin.hrl").
@@ -62,24 +64,22 @@ start(Host, Opts) ->
     case Mod:init(Host, Opts) of
 	ok ->
 	    init_cache(Mod, Host, Opts),
-	    ejabberd_hooks:add(bounce_sm_packet, Host, ?MODULE, bounce_sm_packet, 50),
-	    ejabberd_hooks:add(disco_sm_features, Host, ?MODULE, disco_sm_features, 50),
-	    ejabberd_hooks:add(remove_user, Host, ?MODULE, remove_user, 50),
-	    ejabberd_hooks:add(webadmin_user, Host, ?MODULE, webadmin_user, 50),
-	    ejabberd_hooks:add(webadmin_page_host, Host, ?MODULE, webadmin_page, 50),
-	    gen_iq_handler:add_iq_handler(ejabberd_sm, Host, ?NS_MIX_PAM_0,
-					  ?MODULE, process_iq);
+	    {ok,
+	     [{hook, bounce_sm_packet, bounce_sm_packet, 50},
+	      {hook, disco_sm_features, disco_sm_features, 50},
+	      {hook, remove_user, remove_user, 50},
+	      {hook, roster_get, get_mix_roster_items, 50},
+	      {hook, webadmin_user, webadmin_user, 50},
+	      {hook, webadmin_menu_hostuser, webadmin_menu_hostuser, 50},
+	      {hook, webadmin_page_hostuser, webadmin_page_hostuser, 50},
+	      {iq_handler, ejabberd_sm, ?NS_MIX_PAM_0, process_iq},
+	      {iq_handler, ejabberd_sm, ?NS_MIX_PAM_2, process_iq}]};
 	Err ->
 	    Err
     end.
 
-stop(Host) ->
-    ejabberd_hooks:delete(bounce_sm_packet, Host, ?MODULE, bounce_sm_packet, 50),
-    ejabberd_hooks:delete(disco_sm_features, Host, ?MODULE, disco_sm_features, 50),
-    ejabberd_hooks:delete(remove_user, Host, ?MODULE, remove_user, 50),
-    ejabberd_hooks:delete(webadmin_user, Host, ?MODULE, webadmin_user, 50),
-    ejabberd_hooks:delete(webadmin_page_host, Host, ?MODULE, webadmin_page, 50),
-    gen_iq_handler:remove_iq_handler(ejabberd_sm, Host, ?NS_MIX_PAM_0).
+stop(_Host) ->
+    ok.
 
 reload(Host, NewOpts, OldOpts) ->
     NewMod = gen_mod:db_mod(NewOpts, ?MODULE),
@@ -121,7 +121,7 @@ mod_doc() ->
               "The module is needed if MIX compatible clients "
               "on your server are going to join MIX channels "
               "(either on your server or on any remote servers)."), "",
-           ?T("NOTE: 'mod_mix' is not required for this module "
+           ?T("NOTE: _`mod_mix`_ is not required for this module "
               "to work, however, without 'mod_mix_pam' the MIX "
               "functionality of your local XMPP clients will be impaired.")],
       opts =>
@@ -176,7 +176,7 @@ bounce_sm_packet(Acc) ->
 disco_sm_features({error, _Error} = Acc, _From, _To, _Node, _Lang) ->
     Acc;
 disco_sm_features(Acc, _From, _To, <<"">>, _Lang) ->
-    {result, [?NS_MIX_PAM_0 |
+    {result, [?NS_MIX_PAM_0, ?NS_MIX_PAM_2 |
 	      case Acc of
 		  {result, Features} -> Features;
 		  empty -> []
@@ -208,6 +208,26 @@ process_iq(#iq{type = set,
 process_iq(IQ) ->
     xmpp:make_error(IQ, unsupported_query_error(IQ)).
 
+-spec get_mix_roster_items([#roster_item{}], {binary(), binary()}) -> [#roster_item{}].
+get_mix_roster_items(Acc, {LUser, LServer}) ->
+    JID = jid:make(LUser, LServer),
+    case get_channels(JID) of
+        {ok, Channels} ->
+            lists:map(
+                fun({ItemJID, Id}) ->
+                    #roster_item{
+                        jid = ItemJID,
+                        name = <<>>,
+                        subscription = both,
+                        ask = undefined,
+                        groups = [],
+                        mix_channel = #mix_roster_channel{participant_id = Id}
+                    }
+                end, Channels);
+        _ ->
+            []
+    end ++ Acc.
+
 -spec remove_user(binary(), binary()) -> ok | {error, db_failure}.
 remove_user(LUser, LServer) ->
     Mod = gen_mod:db_mod(LServer, ?MODULE),
@@ -237,13 +257,25 @@ remove_user(LUser, LServer) ->
 %%% Internal functions
 %%%===================================================================
 -spec process_join(iq()) -> ignore.
-process_join(#iq{from = From,
+process_join(#iq{from = From, lang = Lang,
 		 sub_els = [#mix_client_join{channel = Channel,
-					     join = Join}]} = IQ) ->
+		                             join = Join}]} = IQ) ->
     ejabberd_router:route_iq(
       #iq{from = jid:remove_resource(From),
 	  to = Channel, type = set, sub_els = [Join]},
-      fun(ResIQ) -> process_join_result(ResIQ, IQ) end),
+      fun(#iq{sub_els = [El]} = ResIQ) ->
+        try xmpp:decode(El) of
+            MixJoin ->
+                process_join_result(ResIQ#iq {
+                    sub_els = [MixJoin]
+                }, IQ)
+        catch
+            _:{xmpp_codec, Reason} ->
+                Txt = xmpp:io_format_error(Reason),
+                Err = xmpp:err_bad_request(Txt, Lang),
+                ejabberd_router:route_error(IQ, Err)
+        end
+      end),
     ignore.
 
 -spec process_leave(iq()) -> iq() | error.
@@ -262,24 +294,40 @@ process_leave(#iq{from = From,
     end.
 
 -spec process_join_result(iq(), iq()) -> ok.
-process_join_result(#iq{from = Channel,
-			type = result, sub_els = [#mix_join{id = ID} = Join]},
+process_join_result(#iq{from = #jid{} = Channel,
+			type = result, sub_els = [#mix_join{id = ID, xmlns = XmlNs} = Join]},
 		    #iq{to = To} = IQ) ->
     case add_channel(To, Channel, ID) of
 	ok ->
+	    % Do roster push
+	    mod_roster:push_item(To, #roster_item{jid = #jid{}}, #roster_item{
+		jid = Channel,
+		name = <<>>,
+		subscription = none,
+		ask = undefined,
+		groups = [],
+		mix_channel = #mix_roster_channel{participant_id = ID}
+	    }),
+	    % send IQ result
 	    ChanID = make_channel_id(Channel, ID),
 	    Join1 = Join#mix_join{id = <<"">>, jid = ChanID},
-	    ResIQ = xmpp:make_iq_result(IQ, #mix_client_join{join = Join1}),
+	    ResIQ = xmpp:make_iq_result(IQ, #mix_client_join{join = Join1, xmlns = XmlNs}),
 	    ejabberd_router:route(ResIQ);
 	{error, db_failure} ->
 	    ejabberd_router:route_error(IQ, db_error(IQ))
     end;
-process_join_result(Err, IQ) ->
+process_join_result(#iq{type = error} = Err, IQ) ->
     process_iq_error(Err, IQ).
 
 -spec process_leave_result(iq(), iq()) -> ok.
-process_leave_result(#iq{type = result, sub_els = [#mix_leave{} = Leave]}, IQ) ->
-    ResIQ = xmpp:make_iq_result(IQ, #mix_client_leave{leave = Leave}),
+process_leave_result(#iq{from = Channel, type = result, sub_els = [#mix_leave{xmlns = XmlNs} = Leave]},
+		     #iq{to = User} = IQ) ->
+    % Do roster push
+    mod_roster:push_item(User,
+	#roster_item{jid = Channel, subscription = none},
+	#roster_item{jid = Channel, subscription = remove}),
+    % send iq result
+    ResIQ = xmpp:make_iq_result(IQ, #mix_client_leave{leave = Leave, xmlns = XmlNs}),
     ejabberd_router:route(ResIQ);
 process_leave_result(Err, IQ) ->
     process_iq_error(Err, IQ).
@@ -416,7 +464,7 @@ delete_cache(Mod, JID, Channel) ->
 %%%===================================================================
 %%% Webadmin interface
 %%%===================================================================
-webadmin_user(Acc, User, Server, Lang) ->
+webadmin_user(Acc, User, Server, #request{lang = Lang}) ->
     QueueLen = case get_channels({jid:nodeprep(User), jid:nameprep(Server), <<>>}) of
 	{ok, Channels} -> length(Channels);
 	error -> -1
@@ -429,12 +477,13 @@ webadmin_user(Acc, User, Server, Lang) ->
          ?C(<<"  |   ">>),
          FQueueView].
 
-webadmin_page(_, Host,
-              #request{us = _US, path = [<<"user">>, U, <<"mix_channels">>],
-                       lang = Lang} = _Request) ->
+webadmin_menu_hostuser(Acc, _Host, _Username, _Lang) ->
+    Acc ++ [{<<"mix_channels">>, <<"MIX Channels">>}].
+
+webadmin_page_hostuser(_, Host, U, #request{path = [<<"mix_channels">>], lang = Lang}) ->
     Res = web_mix_channels(U, Host, Lang),
     {stop, Res};
-webadmin_page(Acc, _, _) -> Acc.
+webadmin_page_hostuser(Acc, _, _, _) -> Acc.
 
 web_mix_channels(User, Server, Lang) ->
     LUser = jid:nodeprep(User),
@@ -459,7 +508,7 @@ web_mix_channels(User, Server, Lang) ->
 	    [?XE(<<"table">>, [THead, ?XE(<<"tbody">>, Entries)])]
     end,
     PageTitle = str:translate_and_format(Lang, ?T("Joined MIX channels of ~ts"), [us_to_list(US)]),
-    (?H1GL(PageTitle, <<"modules/#mod-mix-pam">>, <<"mod_mix_pam">>))
+    (?H1GL(PageTitle, <<"modules/#mod_mix_pam">>, <<"mod_mix_pam">>))
         ++ FItems.
 
 us_to_list({User, Server}) ->

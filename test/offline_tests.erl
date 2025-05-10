@@ -3,7 +3,7 @@
 %%% Created :  7 Nov 2016 by Evgeny Khramtsov <ekhramtsov@process-one.net>
 %%%
 %%%
-%%% ejabberd, Copyright (C) 2002-2022   ProcessOne
+%%% ejabberd, Copyright (C) 2002-2025   ProcessOne
 %%%
 %%% This program is free software; you can redistribute it and/or
 %%% modify it under the terms of the GNU General Public License as
@@ -142,7 +142,7 @@ unsupported_iq(Config) ->
 %%%===================================================================
 %%% Master-slave tests
 %%%===================================================================
-master_slave_cases(DB) ->
+master_slave_cases(_DB) ->
     {offline_master_slave, [sequence],
      [master_slave_test(flex),
       master_slave_test(send_all),
@@ -233,8 +233,6 @@ mucsub_mam_slave(Config) ->
     gen_mod:update_module(Server, mod_mam, #{user_mucsub_from_muc_archive => true}),
 
     Room = suite:muc_room_jid(Config),
-    MyJID = my_jid(Config),
-    MyJIDBare = jid:remove_resource(MyJID),
     ok = mam_tests:set_default(Config, always),
     #presence{} = send_recv(Config, #presence{}),
     send(Config, #presence{type = unavailable}),

@@ -1,42 +1,44 @@
 
 [![GitHub tag (latest SemVer)](https://img.shields.io/github/v/tag/processone/ejabberd?sort=semver&logo=embarcadero&label=&color=49c0c4)](https://github.com/processone/ejabberd/tags)
-[![GitHub Container](https://img.shields.io/github/v/tag/processone/ejabberd?label=container&sort=semver)](https://github.com/processone/ejabberd/pkgs/container/ejabberd)
-[![Docker Image Version (latest semver)](https://img.shields.io/docker/v/ejabberd/ecs?label=docker)](https://hub.docker.com/r/ejabberd/ecs/)
+[![ejabberd Container on GitHub](https://img.shields.io/github/v/tag/processone/ejabberd?label=ejabberd&sort=semver&logo=opencontainersinitiative&logoColor=2094f3)](https://github.com/processone/ejabberd/pkgs/container/ejabberd)
+[![ecs Container on Docker](https://img.shields.io/docker/v/ejabberd/ecs?label=ecs&sort=semver&logo=docker)](https://hub.docker.com/r/ejabberd/ecs/)
 
-
-ejabberd Container
-==================
+ejabberd Container Images
+=========================
 
 [ejabberd][home] is an open-source,
 robust, scalable and extensible realtime platform built using [Erlang/OTP][erlang],
 that includes [XMPP][xmpp] Server, [MQTT][mqtt] Broker and [SIP][sip] Service.
 
-[home]: https://ejabberd.im/
+[home]: https://www.ejabberd.im/
 [erlang]: https://www.erlang.org/
 [xmpp]: https://xmpp.org/
 [mqtt]: https://mqtt.org/
 [sip]: https://en.wikipedia.org/wiki/Session_Initiation_Protocol
 
-This document explains how to use the
-[ejabberd container images](https://github.com/processone/ejabberd/pkgs/container/ejabberd)
-available in the GitHub Container Registry,
-built using the files in `.github/container/`.
+This page documents those container images ([images comparison](#images-comparison)):
 
-Alternatively, there are also
-[ejabberd-ecs Docker images](https://hub.docker.com/r/ejabberd/ecs/)
-available in Docker Hub,
-built using the
-[docker-ejabberd/ecs](https://github.com/processone/docker-ejabberd/tree/master/ecs)
-repository.
+- [![ejabberd Container](https://img.shields.io/badge/ejabberd-grey?logo=opencontainersinitiative&logoColor=2094f3)](https://github.com/processone/ejabberd/pkgs/container/ejabberd)  
+  published in [ghcr.io/processone/ejabberd](https://github.com/processone/ejabberd/pkgs/container/ejabberd),
+  built using [ejabberd](https://github.com/processone/ejabberd/tree/master/.github/container) repository,
+  both for stable ejabberd releases and the `master` branch, in x64 and arm64 architectures.
 
-If you are using a Windows operating system, check the tutorials mentioned in
-[ejabberd Docs > Docker Image](https://docs.ejabberd.im/admin/installation/#docker-image).
+- [![ecs Container](https://img.shields.io/badge/ecs-grey?logo=docker&logoColor=2094f3)](https://hub.docker.com/r/ejabberd/ecs/)  
+  published in [docker.io/ejabberd/ecs](https://hub.docker.com/r/ejabberd/ecs/),
+  built using [docker-ejabberd/ecs](https://github.com/processone/docker-ejabberd/tree/master/ecs) repository
+  for ejabberd stable releases in x64 architectures.
+
+For Microsoft Windows, see
+[Docker Desktop for Windows 10](https://www.process-one.net/blog/install-ejabberd-on-windows-10-using-docker-desktop/),
+and [Docker Toolbox for Windows 7](https://www.process-one.net/blog/install-ejabberd-on-windows-7-using-docker-toolbox/).
+
+For Kubernetes Helm, see [help-ejabberd](https://github.com/sando38/helm-ejabberd).
 
 
 Start ejabberd
 --------------
 
-### With default configuration
+### daemon
 
 Start ejabberd in a new container:
 
@@ -45,13 +47,7 @@ docker run --name ejabberd -d -p 5222:5222 ghcr.io/processone/ejabberd
 ```
 
 That runs the container as a daemon,
-using ejabberd default configuration file and XMPP domain "localhost".
-
-Stop the running container:
-
-```bash
-docker stop ejabberd
-```
+using ejabberd default configuration file and XMPP domain `localhost`.
 
 Restart the stopped ejabberd container:
 
@@ -59,60 +55,91 @@ Restart the stopped ejabberd container:
 docker restart ejabberd
 ```
 
+Stop the running container:
 
-### Start with Erlang console attached
+```bash
+docker stop ejabberd
+```
 
-Start ejabberd with an Erlang console attached using the `live` command:
+Remove the ejabberd container:
+
+```bash
+docker rm ejabberd
+```
+
+
+### with Erlang console
+
+Start ejabberd with an interactive Erlang console attached using the `live` command:
 
 ```bash
 docker run --name ejabberd -it -p 5222:5222 ghcr.io/processone/ejabberd live
 ```
 
-That uses the default configuration file and XMPP domain "localhost".
+That uses the default configuration file and XMPP domain `localhost`.
 
 
-### Start with your configuration and database
+### with your data
 
 Pass a configuration file as a volume
 and share the local directory to store database:
 
 ```bash
-mkdir database
-chown ejabberd database
+mkdir conf && cp ejabberd.yml.example conf/ejabberd.yml
 
-cp ejabberd.yml.example ejabberd.yml
+mkdir database && chown ejabberd database
 
 docker run --name ejabberd -it \
-  -v $(pwd)/ejabberd.yml:/opt/ejabberd/conf/ejabberd.yml \
+  -v $(pwd)/conf/ejabberd.yml:/opt/ejabberd/conf/ejabberd.yml \
   -v $(pwd)/database:/opt/ejabberd/database \
   -p 5222:5222 ghcr.io/processone/ejabberd live
 ```
 
-Notice that ejabberd runs in the container with an account named `ejabberd`,
+Notice that ejabberd runs in the container with an account named `ejabberd`
+with UID 9000 and group `ejabberd` with GID 9000,
 and the volumes you mount must grant proper rights to that account.
 
 
 Next steps
 ----------
 
-### Register the administrator account
+### Register admin account
 
-The default ejabberd configuration does not grant admin privileges
-to any account,
-you may want to register a new account in ejabberd
-and grant it admin rights.
+#### [![ejabberd Container](https://img.shields.io/badge/ejabberd-grey?logo=opencontainersinitiative&logoColor=2094f3)](https://github.com/processone/ejabberd/pkgs/container/ejabberd) [:orange_circle:](#images-comparison)
 
-Register an account using the `ejabberdctl` script:
+If you set the `REGISTER_ADMIN_PASSWORD` environment variable,
+an account is automatically registered with that password,
+and admin privileges are granted to it.
+The account created depends on what variables you have set:
+
+- `EJABBERD_MACRO_ADMIN=juliet@example.org` -> `juliet@example.org`
+- `EJABBERD_MACRO_HOST=example.org` -> `admin@example.org`
+- None of those variables are set -> `admin@localhost`
+
+The account registration is shown in the container log:
+
+```
+:> ejabberdctl register admin example.org somePassw0rd
+User admin@example.org successfully registered
+```
+
+Alternatively, you can register the account manually yourself
+and edit `conf/ejabberd.yml` and add the ACL as explained in
+[ejabberd Docs: Administration Account](https://docs.ejabberd.im/admin/install/next-steps/#administration-account).
+
+---
+
+#### [![ecs Container](https://img.shields.io/badge/ecs-grey?logo=docker&logoColor=2094f3)](https://hub.docker.com/r/ejabberd/ecs/)
+
+The default ejabberd configuration has already granted admin privilege
+to an account that would be called `admin@localhost`,
+so you just need to register it, for example:
 
 ```bash
 docker exec -it ejabberd ejabberdctl register admin localhost passw0rd
 ```
 
-Then edit conf/ejabberd.yml and add the ACL as explained in
-[ejabberd Docs: Administration Account](https://docs.ejabberd.im/admin/installation/#administration-account)
-
-
-### Check ejabberd log files
+### Check ejabberd log
 
 Check the content of the log files inside the container,
 even if you do not put it on a shared persistent drive:
@@ -122,7 +149,7 @@ docker exec -it ejabberd tail -f logs/ejabberd.log
 ```
 
 
-### Inspect the container files
+### Inspect container files
 
 The container uses Alpine Linux. Start a shell inside the container:
 
@@ -131,7 +158,7 @@ docker exec -it ejabberd sh
 ```
 
 
-### Open ejabberd debug console
+### Open debug console
 
 Open an interactive debug Erlang console attached to a running ejabberd in a running container:
 
@@ -154,10 +181,9 @@ Now update your ejabberd configuration file, for example:
 docker exec -it ejabberd vi conf/ejabberd.yml
 ```
 
-and add the required options:
-```
-captcha_cmd: /opt/ejabberd-22.04/lib/ejabberd-22.04/priv/bin/captcha.sh
-captcha_url: https://localhost:5443/captcha
+and add this option:
+```yaml
+captcha_cmd: "$HOME/bin/captcha.sh"
 ```
 
 Finally, reload the configuration file or restart the container:
@@ -165,20 +191,35 @@ Finally, reload the configuration file or restart the container:
 docker exec ejabberd ejabberdctl reload_config
 ```
 
+If the CAPTCHA image is not visible, there may be a problem generating it
+(the ejabberd log file may show some error message);
+or the image URL may not be correctly detected by ejabberd,
+in that case you can set the correct URL manually, for example:
+```yaml
+captcha_url: https://localhost:5443/captcha
+```
 
-Advanced Container Configuration
---------------------------------
+For more details about CAPTCHA options, please check the
+[CAPTCHA](https://docs.ejabberd.im/admin/configuration/basic/#captcha)
+documentation section.
+
+
+Advanced
+--------
 
 ### Ports
 
-This container image exposes the ports:
+The container image exposes several ports
+(check also [Docs: Firewall Settings](https://docs.ejabberd.im/admin/guide/security/#firewall-settings)):
 
 - `5222`: The default port for XMPP clients.
 - `5269`: For XMPP federation. Only needed if you want to communicate with users on other servers.
-- `5280`: For admin interface.
+- `5280`: For admin interface (URL is `admin/`).
+- `1880`: For admin interface (URL is `/`, useful for [podman-desktop](https://podman-desktop.io/) and [docker-desktop](https://www.docker.com/products/docker-desktop/)) [:orange_circle:](#images-comparison)
 - `5443`: With encryption, used for admin interface, API, CAPTCHA, OAuth, Websockets and XMPP BOSH.
 - `1883`: Used for MQTT
 - `4369-4399`: EPMD and Erlang connectivity, used for `ejabberdctl` and clustering
+- `5210`: Erlang connectivity when `ERL_DIST_PORT` is set, alternative to EPMD [:orange_circle:](#images-comparison)
 
 
 ### Volumes
@@ -195,28 +236,120 @@ You should back up or export the content of the directory to persistent storage
 - `/opt/ejabberd/logs/`: Directory containing log files
 - `/opt/ejabberd/upload/`: Directory containing uploaded files. This should also be backed up.
 
-All these files are owned by `ejabberd` user inside the container.
+All these files are owned by an account named `ejabberd` with group `ejabberd` in the container.
+Its corresponding `UID:GID` is `9000:9000`.
+If you prefer bind mounts instead of volumes, then
+you need to map this to valid `UID:GID` on your host to get read/write access on
+mounted directories.
 
-It's possible to install additional ejabberd modules using volumes,
-[this comment](https://github.com/processone/docker-ejabberd/issues/81#issuecomment-1036115146)
-explains how to install an additional module using docker-compose.
+If using Docker, try:
+```bash
+mkdir database
+sudo chown 9000:9000 database
+```
+
+If using Podman, try:
+```bash
+mkdir database
+podman unshare chown 9000:9000 database
+```
+
+It's possible to install additional ejabberd modules using volumes, check
+[this Docs tutorial](https://docs.ejabberd.im/developer/extending-ejabberd/modules/#your-module-in-ejabberd-modules-with-ejabberd-container).
 
 
 ### Commands on start
 
 The ejabberdctl script reads the `CTL_ON_CREATE` environment variable
-the first time the docker container is started,
+the first time the container is started,
 and reads `CTL_ON_START` every time the container is started.
 Those variables can contain one ejabberdctl command,
 or several commands separated with the blankspace and `;` characters.
 
-Example usage (see full example [docker-compose.yml](https://github.com/processone/docker-ejabberd/issues/64#issuecomment-887741332)):
+If any of those commands returns a failure, the container starting gets aborted.
+If there is a command with a result that can be ignored,
+prefix that command with `!`
+
+This example, registers an `admin@localhost` account when the container is first created.
+Everytime the container starts, it shows the list of registered accounts,
+checks that the admin account exists and password is valid,
+changes the password of an account if it exists (ignoring any failure),
+and shows the ejabberd starts (check also the [full example](#customized-example)):
 ```yaml
     environment:
       - CTL_ON_CREATE=register admin localhost asd
       - CTL_ON_START=stats registeredusers ;
                      check_password admin localhost asd ;
+                     ! change_password bot123 localhost qqq ;
                      status
+```
+
+
+### Macros in environment [:high_brightness:](#images-comparison)
+
+ejabberd reads `EJABBERD_MACRO_*` environment variables
+and uses them to define the corresponding
+[macros](https://docs.ejabberd.im/admin/configuration/file-format/#macros-in-configuration-file),
+overwriting the corresponding macro definition if it was set in the configuration file.
+This is supported since ejabberd 24.12.
+
+For example, if you configure this in `ejabberd.yml`:
+
+```yaml
+acl:
+  admin:
+    user: ADMIN
+```
+
+now you can define the admin account JID using an environment variable:
+```yaml
+    environment:
+      - EJABBERD_MACRO_ADMIN=admin@localhost
+```
+
+Check the [full example](#customized-example) for other example.
+
+
+### ejabberdapi
+
+When the container is running (and thus ejabberd), you can exec commands inside the container
+using `ejabberdctl` or any other of the available interfaces, see
+[Understanding ejabberd "commands"](https://docs.ejabberd.im/developer/ejabberd-api/#understanding-ejabberd-commands)
+
+Additionally, the container image includes the `ejabberdapi` executable.
+Please check the [ejabberd-api homepage](https://github.com/processone/ejabberd-api)
+for configuration and usage details.
+
+For example, if you configure ejabberd like this:
+```yaml
+listen:
+  -
+    port: 5282
+    module: ejabberd_http
+    request_handlers:
+      "/api": mod_http_api
+
+acl:
+  loopback:
+    ip:
+      - 127.0.0.0/8
+      - ::1/128
+      - ::FFFF:127.0.0.1/128
+
+api_permissions:
+  "admin access":
+    who:
+      access:
+        allow:
+          acl: loopback
+    what:
+      - "register"
+```
+
+Then you could register new accounts with this query:
+
+```bash
+docker exec -it ejabberd ejabberdapi register --endpoint=http://127.0.0.1:5282/ --jid=admin@localhost --password=passw0rd
 ```
 
 
@@ -230,8 +363,29 @@ and the same
 [Erlang Cookie](https://docs.ejabberd.im/admin/guide/security/#erlang-cookie).
 
 For this you can either:
+
 - edit `conf/ejabberdctl.cfg` and set variables `ERLANG_NODE` and `ERLANG_COOKIE`
 - set the environment variables `ERLANG_NODE_ARG` and `ERLANG_COOKIE`
+
+---
+
+Example to connect a local `ejabberdctl` to a containerized ejabberd:
+
+1. When creating the container, export port 5210, and set `ERLANG_COOKIE`:
+    ```sh
+    docker run --name ejabberd -it \
+      -e ERLANG_COOKIE=`cat $HOME/.erlang.cookie` \
+      -p 5210:5210 -p 5222:5222 \
+      ghcr.io/processone/ejabberd
+    ```
+2. Set `ERL_DIST_PORT=5210` in `ejabberdctl.cfg` of container and local ejabberd
+3. Restart the container
+4. Now use `ejabberdctl` in your local ejabberd deployment
+
+To connect using a local `ejabberd` script:
+```sh
+ERL_DIST_PORT=5210 _build/dev/rel/ejabberd/bin/ejabberd ping
+```
 
 Example using environment variables (see full example [docker-compose.yml](https://github.com/processone/docker-ejabberd/issues/64#issuecomment-887741332)):
 ```yaml
@@ -240,49 +394,556 @@ Example using environment variables (see full example [docker-compose.yml](https
       - ERLANG_COOKIE=dummycookie123
 ```
 
+---
 
-Generating a Container Image
-----------------------------
+Once you have the ejabberd nodes properly set and running,
+you can tell the secondary nodes to join the master node using the
+[`join_cluster`](https://docs.ejabberd.im/developer/ejabberd-api/admin-api/#join-cluster)
+API call.
 
-This container image includes ejabberd as a standalone OTP release built using Elixir.
+Example using environment variables (see the full
+[`docker-compose.yml` clustering example](#clustering-example)):
+```yaml
+environment:
+  - ERLANG_NODE_ARG=ejabberd@replica
+  - ERLANG_COOKIE=dummycookie123
+  - CTL_ON_CREATE=join_cluster ejabberd@main
+```
 
-That OTP release is configured with:
+### Change Mnesia Node Name
+
+To use the same Mnesia database in a container with a different hostname,
+it is necessary to change the old hostname stored in Mnesia.
+
+This section is equivalent to the ejabberd Documentation
+[Change Computer Hostname](https://docs.ejabberd.im/admin/guide/managing/#change-computer-hostname),
+but particularized to containers that use this
+ecs container image from ejabberd 23.01 or older.
+
+#### Setup Old Container
+
+Let's assume a container running ejabberd 23.01 (or older) from
+this ecs container image, with the database directory binded
+and one registered account.
+This can be produced with:
+```bash
+OLDCONTAINER=ejaold
+NEWCONTAINER=ejanew
+
+mkdir database
+sudo chown 9000:9000 database
+docker run -d --name $OLDCONTAINER -p 5222:5222 \
+       -v $(pwd)/database:/opt/ejabberd/database \
+       ghcr.io/processone/ejabberd:23.01
+docker exec -it $OLDCONTAINER ejabberdctl started
+docker exec -it $OLDCONTAINER ejabberdctl register user1 localhost somepass
+docker exec -it $OLDCONTAINER ejabberdctl registered_users localhost
+```
+
+Methods to know the Erlang node name:
+```bash
+ls database/ | grep ejabberd@
+docker exec -it $OLDCONTAINER ejabberdctl status
+docker exec -it $OLDCONTAINER grep "started in the node" logs/ejabberd.log
+```
+
+#### Change Mnesia Node
+
+First of all let's store the Erlang node names and paths in variables.
+In this example they would be:
+```bash
+OLDCONTAINER=ejaold
+NEWCONTAINER=ejanew
+OLDNODE=ejabberd@95145ddee27c
+NEWNODE=ejabberd@localhost
+OLDFILE=/opt/ejabberd/database/old.backup
+NEWFILE=/opt/ejabberd/database/new.backup
+```
+
+1. Start your old container that can still read the Mnesia database correctly.
+If you have the Mnesia spool files,
+but don't have access to the old container anymore, go to
+[Create Temporary Container](#create-temporary-container)
+and later come back here.
+
+2. Generate a backup file and check it was created:
+```bash
+docker exec -it $OLDCONTAINER ejabberdctl backup $OLDFILE
+ls -l database/*.backup
+```
+
+3. Stop ejabberd:
+```bash
+docker stop $OLDCONTAINER
+```
+
+4. Create the new container. For example:
+```bash
+docker run \
+       --name $NEWCONTAINER \
+       -d \
+       -p 5222:5222 \
+       -v $(pwd)/database:/opt/ejabberd/database \
+       ghcr.io/processone/ejabberd:latest
+```
+
+5. Convert the backup file to new node name:
+```bash
+docker exec -it $NEWCONTAINER ejabberdctl mnesia_change_nodename $OLDNODE $NEWNODE $OLDFILE $NEWFILE
+```
+
+6. Install the backup file as a fallback:
+```bash
+docker exec -it $NEWCONTAINER ejabberdctl install_fallback $NEWFILE
+```
+
+7. Restart the container:
+```bash
+docker restart $NEWCONTAINER
+```
+
+8. Check that the information of the old database is available.
+In this example, it should show that the account `user1` is registered:
+```bash
+docker exec -it $NEWCONTAINER ejabberdctl registered_users localhost
+```
+
+9. When the new container is working perfectly with the converted Mnesia database,
+you may want to remove the unneeded files:
+the old container, the old Mnesia spool files, and the backup files.
+
+#### Create Temporary Container
+
+In case the old container that used the Mnesia database is not available anymore,
+a temporary container can be created just to read the Mnesia database
+and make a backup of it, as explained in the previous section.
+
+This method uses `--hostname` command line argument for docker,
+and `ERLANG_NODE_ARG` environment variable for ejabberd.
+Their values must be the hostname of your old container
+and the Erlang node name of your old ejabberd node.
+To know the Erlang node name please check
+[Setup Old Container](#setup-old-container).
+
+Command line example:
+```bash
+OLDHOST=${OLDNODE#*@}
+docker run \
+       -d \
+       --name $OLDCONTAINER \
+       --hostname $OLDHOST \
+       -p 5222:5222 \
+       -v $(pwd)/database:/opt/ejabberd/database \
+       -e ERLANG_NODE_ARG=$OLDNODE \
+       ghcr.io/processone/ejabberd:latest
+```
+
+Check the old database content is available:
+```bash
+docker exec -it $OLDCONTAINER ejabberdctl registered_users localhost
+```
+
+Now that you have ejabberd running with access to the Mnesia database,
+you can continue with step 2 of previous section
+[Change Mnesia Node](#change-mnesia-node).
+
+
+Build Container Image
+----------------
+
+The container image includes ejabberd as a standalone OTP release built using Elixir.
+
+### Build `ejabberd` [![ejabberd Container](https://img.shields.io/badge/ejabberd-grey?logo=opencontainersinitiative&logoColor=2094f3)](https://github.com/processone/ejabberd/pkgs/container/ejabberd)
+
+The ejabberd Erlang/OTP release is configured with:
 
 - `mix.exs`: Customize ejabberd release
 - `vars.config`: ejabberd compilation configuration options
 - `config/runtime.exs`: Customize ejabberd paths
 - `ejabberd.yml.template`: ejabberd default config file
 
-Build ejabberd Community Server base image from ejabberd master on GitHub:
+#### Direct build
+
+Build ejabberd Community Server container image from ejabberd master git repository:
 
 ```bash
-VERSION=master
-docker build \
-    --build-arg VERSION=$VERSION \
-    -t personal/ejabberd:$VERSION \
-    .github/container
-```
-
-Build ejabberd Community Server base image for a given ejabberd version,
-both for amd64 and arm64 architectures:
-
-```bash
-VERSION=22.05
 docker buildx build \
-    --platform=linux/amd64,linux/arm64
-    --build-arg VERSION=$VERSION \
-    -t personal/ejabberd:$VERSION \
-    .github/container
+    -t personal/ejabberd \
+    -f .github/container/Dockerfile \
+    .
 ```
 
-It's also possible to use podman instead of docker, just notice:
+#### Podman build
+
+To build the image using Podman, please notice:
+
 - `EXPOSE 4369-4399` port range is not supported, remove that in Dockerfile
 - It mentions that `healthcheck` is not supported by the Open Container Initiative image format
-- If you want to start with command `live`, add environment variable `EJABBERD_BYPASS_WARNINGS=true`
+- to start with command `live`, you may want to add environment variable `EJABBERD_BYPASS_WARNINGS=true`
+
 ```bash
-VERSION=master
 podman build \
-    --build-arg VERSION=$VERSION \
-    -t ja:$(version) \
-    .github/container
+    -t ejabberd \
+    -f .github/container/Dockerfile \
+    .
+
+podman run --name eja1 -d -p 5222:5222 localhost/ejabberd
+
+podman exec eja1 ejabberdctl status
+
+podman exec -it eja1 sh
+
+podman stop eja1
+
+podman run --name eja1 -it -e EJABBERD_BYPASS_WARNINGS=true -p 5222:5222 localhost/ejabberd live
 ```
+
+### Build `ecs` [![ecs Container](https://img.shields.io/badge/ecs-grey?logo=docker&logoColor=2094f3)](https://hub.docker.com/r/ejabberd/ecs/)
+
+The ejabberd Erlang/OTP release is configured with:
+
+- `rel/config.exs`: Customize ejabberd release
+- `rel/dev.exs`: ejabberd environment configuration for development release
+- `rel/prod.exs`: ejabberd environment configuration for production release
+- `vars.config`: ejabberd compilation configuration options
+- `conf/ejabberd.yml`: ejabberd default config file
+
+Build ejabberd Community Server base image from ejabberd master on Github:
+
+```bash
+docker build -t personal/ejabberd .
+```
+
+Build ejabberd Community Server base image for a given ejabberd version:
+
+```bash
+./build.sh 18.03
+```
+
+Composer Examples
+-----------------
+
+### Minimal Example
+
+This is the barely minimal file to get a usable ejabberd.
+
+If using Docker, write this `docker-compose.yml` file
+and start it with `docker-compose up`:
+
+```yaml
+services:
+  main:
+    image: ghcr.io/processone/ejabberd
+    container_name: ejabberd
+    ports:
+      - "5222:5222"
+      - "5269:5269"
+      - "5280:5280"
+      - "5443:5443"
+```
+
+If using Podman, write this `minimal.yml` file
+and start it with `podman kube play minimal.yml`:
+
+```yaml
+apiVersion: v1
+
+kind: Pod
+
+metadata:
+  name: ejabberd
+
+spec:
+  containers:
+
+  - name: ejabberd
+    image: ghcr.io/processone/ejabberd
+    ports:
+    - containerPort: 5222
+      hostPort: 5222
+    - containerPort: 5269
+      hostPort: 5269
+    - containerPort: 5280
+      hostPort: 5280
+    - containerPort: 5443
+      hostPort: 5443
+```
+
+
+### Customized Example
+
+This example shows the usage of several customizations:
+it uses a local configuration file,
+defines a configuration macro using an environment variable,
+stores the mnesia database in a local path,
+registers an account when it's created,
+and checks the number of registered accounts every time it's started.
+
+Prepare an ejabberd configuration file:
+```bash
+mkdir conf && cp ejabberd.yml.example conf/ejabberd.yml
+```
+
+Create the database directory and allow the container access to it:
+
+- Docker:
+    ```bash
+    mkdir database && sudo chown 9000:9000 database
+    ```
+- Podman:
+    ```bash
+    mkdir database && podman unshare chown 9000:9000 database
+    ```
+
+If using Docker, write this `docker-compose.yml` file
+and start it with `docker-compose up`:
+
+```yaml
+version: '3.7'
+
+services:
+
+  main:
+    image: ghcr.io/processone/ejabberd
+    container_name: ejabberd
+    environment:
+      - EJABBERD_MACRO_HOST=example.com
+      - EJABBERD_MACRO_ADMIN=admin@example.com
+      - REGISTER_ADMIN_PASSWORD=somePassw0rd
+      - CTL_ON_START=registered_users example.com ;
+                     status
+    ports:
+      - "5222:5222"
+      - "5269:5269"
+      - "5280:5280"
+      - "5443:5443"
+    volumes:
+      - ./conf/ejabberd.yml:/opt/ejabberd/conf/ejabberd.yml:ro
+      - ./database:/opt/ejabberd/database
+```
+
+If using Podman, write this `custom.yml` file
+and start it with `podman kube play custom.yml`:
+
+```yaml
+apiVersion: v1
+
+kind: Pod
+
+metadata:
+  name: ejabberd
+
+spec:
+  containers:
+
+  - name: ejabberd
+    image: ghcr.io/processone/ejabberd
+    env:
+    - name: EJABBERD_MACRO_HOST
+      value: example.com
+    - name: EJABBERD_MACRO_ADMIN
+      value: admin@example.com
+    - name: REGISTER_ADMIN_PASSWORD
+      value: somePassw0rd
+    - name: CTL_ON_START
+      value: registered_users example.com ;
+             status
+    ports:
+    - containerPort: 5222
+      hostPort: 5222
+    - containerPort: 5269
+      hostPort: 5269
+    - containerPort: 5280
+      hostPort: 5280
+    - containerPort: 5443
+      hostPort: 5443
+    volumeMounts:
+    - mountPath: /opt/ejabberd/conf/ejabberd.yml
+      name: config
+      readOnly: true
+    - mountPath: /opt/ejabberd/database
+      name: db
+
+  volumes:
+  - name: config
+    hostPath:
+      path: ./conf/ejabberd.yml
+      type: File
+  - name: db
+    hostPath:
+      path: ./database
+      type: DirectoryOrCreate
+```
+
+
+### Clustering Example
+
+In this example, the main container is created first.
+Once it is fully started and healthy, a second container is created,
+and once ejabberd is started in it, it joins the first one.
+
+An account is registered in the first node when created (and
+we ignore errors that can happen when doing that - for example
+when account already exists),
+and it should exist in the second node after join.
+
+Notice that in this example the main container does not have access
+to the exterior; the replica exports the ports and can be accessed.
+
+If using Docker, write this `docker-compose.yml` file
+and start it with `docker-compose up`:
+
+```yaml
+version: '3.7'
+
+services:
+
+  main:
+    image: ghcr.io/processone/ejabberd
+    container_name: main
+    environment:
+      - ERLANG_NODE_ARG=ejabberd@main
+      - ERLANG_COOKIE=dummycookie123
+      - CTL_ON_CREATE=! register admin localhost asd
+    healthcheck:
+      test: netstat -nl | grep -q 5222
+      start_period: 5s
+      interval: 5s
+      timeout: 5s
+      retries: 120
+
+  replica:
+    image: ghcr.io/processone/ejabberd
+    container_name: replica
+    depends_on:
+      main:
+        condition: service_healthy
+    environment:
+      - ERLANG_NODE_ARG=ejabberd@replica
+      - ERLANG_COOKIE=dummycookie123
+      - CTL_ON_CREATE=join_cluster ejabberd@main
+      - CTL_ON_START=registered_users localhost ;
+                     status
+    ports:
+      - "5222:5222"
+      - "5269:5269"
+      - "5280:5280"
+      - "5443:5443"
+```
+
+If using Podman, write this `cluster.yml` file
+and start it with `podman kube play cluster.yml`:
+
+```yaml
+apiVersion: v1
+
+kind: Pod
+
+metadata:
+  name: cluster
+
+spec:
+  containers:
+
+  - name: first
+    image: ghcr.io/processone/ejabberd
+    env:
+    - name: ERLANG_NODE_ARG
+      value: main@cluster
+    - name: ERLANG_COOKIE
+      value: dummycookie123
+    - name: CTL_ON_CREATE
+      value: register admin localhost asd
+    - name: CTL_ON_START
+      value: stats registeredusers ;
+             status
+    - name: EJABBERD_MACRO_PORT_C2S
+      value: 6222
+    - name: EJABBERD_MACRO_PORT_C2S_TLS
+      value: 6223
+    - name: EJABBERD_MACRO_PORT_S2S
+      value: 6269
+    - name: EJABBERD_MACRO_PORT_HTTP_TLS
+      value: 6443
+    - name: EJABBERD_MACRO_PORT_HTTP
+      value: 6280
+    - name: EJABBERD_MACRO_PORT_MQTT
+      value: 6883
+    - name: EJABBERD_MACRO_PORT_PROXY65
+      value: 6777
+    volumeMounts:
+    - mountPath: /opt/ejabberd/conf/ejabberd.yml
+      name: config
+      readOnly: true
+
+  - name: second
+    image: ghcr.io/processone/ejabberd
+    env:
+    - name: ERLANG_NODE_ARG
+      value: replica@cluster
+    - name: ERLANG_COOKIE
+      value: dummycookie123
+    - name: CTL_ON_CREATE
+      value: join_cluster main@cluster ;
+             started ;
+             list_cluster
+    - name: CTL_ON_START
+      value: stats registeredusers ;
+             check_password admin localhost asd ;
+             status
+    ports:
+    - containerPort: 5222
+      hostPort: 5222
+    - containerPort: 5280
+      hostPort: 5280
+    volumeMounts:
+    - mountPath: /opt/ejabberd/conf/ejabberd.yml
+      name: config
+      readOnly: true
+
+  volumes:
+  - name: config
+    hostPath:
+      path: ./conf/ejabberd.yml
+      type: File
+
+```
+
+
+Images Comparison
+-----------------
+
+Let's summarize the differences between both container images. Legend:
+
+- :sparkle: is the recommended alternative
+- :orange_circle: added in the latest release (ejabberd 25.03)
+- :high_brightness: added in the previous release (ejabberd 24.12)
+- :low_brightness: added in the pre-previous release (ejabberd 24.10)
+
+|                       | [![ejabberd Container](https://img.shields.io/badge/ejabberd-grey?logo=opencontainersinitiative&logoColor=2094f3)](https://github.com/processone/ejabberd/pkgs/container/ejabberd) | [![ecs Container](https://img.shields.io/badge/ecs-grey?logo=docker&logoColor=2094f3)](https://hub.docker.com/r/ejabberd/ecs/) |
+|:----------------------|:------------------|:-----------------------|
+| Source code           | [ejabberd/.github/container](https://github.com/processone/ejabberd/tree/master/.github/container) | [docker-ejabberd/ecs](https://github.com/processone/docker-ejabberd/tree/master/ecs) |
+| Generated by          | [container.yml](https://github.com/processone/ejabberd/blob/master/.github/workflows/container.yml) | [tests.yml](https://github.com/processone/docker-ejabberd/blob/master/.github/workflows/tests.yml) |
+| Built for             | stable releases <br /> `master` branch | stable releases <br /> [`master` branch zip](https://github.com/processone/docker-ejabberd/actions/workflows/tests.yml) |
+| Architectures         | `linux/amd64` <br /> `linux/arm64` | `linux/amd64` |
+| Software              | Erlang/OTP 27.3.3-alpine <br /> Elixir 1.18.3 | Alpine 3.19 <br /> Erlang/OTP 26.2 <br /> Elixir 1.15.7 |
+| Published in          | [ghcr.io/processone/ejabberd](https://github.com/processone/ejabberd/pkgs/container/ejabberd) | [docker.io/ejabberd/ecs](https://hub.docker.com/r/ejabberd/ecs/) <br /> [ghcr.io/processone/ecs](https://github.com/processone/docker-ejabberd/pkgs/container/ecs) |
+| :black_square_button: **Additional content** |
+| [ejabberd-contrib](https://docs.ejabberd.im/admin/guide/modules/#ejabberd-contrib) | included | not included |
+| [ejabberdapi](#ejabberdapi) | included :orange_circle: | included |
+| :black_square_button: **Ports** |
+| [1880](#ports) for WebAdmin     | yes :orange_circle: | yes :orange_circle: |
+| [5210](#ports) for `ERL_DIST_PORT` | supported | supported :orange_circle: |
+| :black_square_button: **Paths** |
+| `$HOME`               | `/opt/ejabberd/` | `/home/ejabberd/` |
+| User data             | `$HOME` :sparkle: <br /> `/home/ejabberd/` :orange_circle: | `$HOME` <br /> `/opt/ejabberd/` :sparkle: :low_brightness: |
+| `ejabberdctl`         | `ejabberdctl` :sparkle: <br /> `bin/ejabberdctl` :orange_circle:  | `bin/ejabberdctl` <br /> `ejabberdctl` :sparkle: :low_brightness: |
+| [`captcha.sh`](#captcha)         | `$HOME/bin/captcha.sh` :orange_circle:  | `$HOME/bin/captcha.sh` :orange_circle: |
+| `*.sql` files | `$HOME/sql/*.sql` :sparkle: :orange_circle: <br />  `$HOME/database/*.sql` :orange_circle: | `$HOME/database/*.sql` <br /> `$HOME/sql/*.sql` :sparkle: :orange_circle: |
+| Mnesia spool files | `$HOME/database/` :sparkle: <br /> `$HOME/database/NODENAME/` :orange_circle:  | `$HOME/database/NODENAME/` <br /> `$HOME/database/` :sparkle: :orange_circle: |
+| :black_square_button: **Variables** |
+| [`EJABBERD_MACRO_*`](#macros-in-environment)      | supported :high_brightness: | supported :high_brightness: |
+| Macros used in `ejabberd.yml` | yes :orange_circle: | yes :orange_circle: |
+| [`EJABBERD_MACRO_ADMIN`](#register-admin-account) | Grant admin rights :orange_circle: <br /> (default `admin@localhost`) <br /> | Hardcoded `admin@localhost` |
+| [`REGISTER_ADMIN_PASSWORD`](#register-admin-account) | Register admin account :orange_circle: | unsupported |
+| `CTL_OVER_HTTP`       | enabled :orange_circle: | unsupported |

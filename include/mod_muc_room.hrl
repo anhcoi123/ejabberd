@@ -1,6 +1,6 @@
 %%%----------------------------------------------------------------------
 %%%
-%%% ejabberd, Copyright (C) 2002-2022   ProcessOne
+%%% ejabberd, Copyright (C) 2002-2025   ProcessOne
 %%%
 %%% This program is free software; you can redistribute it and/or
 %%% modify it under the terms of the GNU General Public License as
@@ -38,13 +38,13 @@
     description                          = <<"">> :: binary(),
     allow_change_subj                    = true :: boolean(),
     allow_query_users                    = true :: boolean(),
-    allow_private_messages               = true :: boolean(),
+    allowpm                              = anyone :: anyone | participants | moderators | none,
     allow_private_messages_from_visitors = anyone :: anyone | moderators | nobody ,
     allow_visitor_status                 = true :: boolean(),
     allow_visitor_nickchange             = true :: boolean(),
     public                               = true :: boolean(),
     public_list                          = true :: boolean(),
-    persistent                           = false :: boolean(),
+    persistent                           = false :: boolean() | {destroying, boolean()},
     moderated                            = true :: boolean(),
     captcha_protected                    = false :: boolean(),
     members_by_default                   = true :: boolean(),
@@ -122,9 +122,10 @@
     robots                  = #{} :: robots(),
     nicks                   = #{} :: nicks(),
     affiliations            = #{} :: affiliations(),
+    roles                   = #{} :: roles(),
     history                 = #lqueue{} :: lqueue(),
     subject                 = [] :: [text()],
-    subject_author          = <<"">> :: binary(),
+    subject_author          = {<<"">>, #jid{}} :: {binary(), jid()},
     hats_users              = #{} :: map(), % FIXME on OTP 21+: #{ljid() => #{binary() => binary()}},
     just_created            = erlang:system_time(microsecond) :: true | integer(),
     activity                = treap:empty() :: treap:treap(),
@@ -137,3 +138,4 @@
 -type robots() :: #{jid() => {binary(), stanza()}}.
 -type nicks() :: #{binary() => [ljid()]}.
 -type affiliations() :: #{ljid() => affiliation() | {affiliation(), binary()}}.
+-type roles() :: #{ljid() => role() | {role(), binary()}}.

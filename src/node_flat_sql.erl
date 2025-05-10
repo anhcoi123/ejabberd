@@ -5,7 +5,7 @@
 %%% Created :  1 Dec 2007 by Christophe Romain <christophe.romain@process-one.net>
 %%%
 %%%
-%%% ejabberd, Copyright (C) 2002-2022   ProcessOne
+%%% ejabberd, Copyright (C) 2002-2025   ProcessOne
 %%%
 %%% This program is free software; you can redistribute it and/or
 %%% modify it under the terms of the GNU General Public License as
@@ -256,6 +256,13 @@ publish_item(Nidx, Publisher, PublishModel, MaxItems, ItemId, Payload,
 			    set_item(OldItem#pubsub_item{
 					modification = {Now, SubKey},
 					payload = Payload}),
+			    {result, {default, broadcast, []}};
+			% Allow node owner to modify any item, he can also delete it and recreate
+			{result, #pubsub_item{creation = {CreationTime, _}} = OldItem} when Affiliation == owner->
+			    set_item(OldItem#pubsub_item{
+				creation = {CreationTime, GenKey},
+				modification = {Now, SubKey},
+				payload = Payload}),
 			    {result, {default, broadcast, []}};
 			{result, _} ->
 			    {error, xmpp:err_forbidden()};

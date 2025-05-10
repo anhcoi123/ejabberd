@@ -5,7 +5,7 @@
 %%% Created : 7 Oct 2006 by Magnus Henoch <henoch@dtek.chalmers.se>
 %%%
 %%%
-%%% ejabberd, Copyright (C) 2002-2022   ProcessOne
+%%% ejabberd, Copyright (C) 2002-2025   ProcessOne
 %%%
 %%% This program is free software; you can redistribute it and/or
 %%% modify it under the terms of the GNU General Public License as
@@ -29,7 +29,7 @@
 
 -author('henoch@dtek.chalmers.se').
 
--protocol({xep, 115, '1.5'}).
+-protocol({xep, 115, '1.5', '2.1.4', "complete", ""}).
 
 -behaviour(gen_server).
 

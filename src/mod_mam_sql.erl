@@ -4,7 +4,7 @@
 %%% Created : 15 Apr 2016 by Evgeny Khramtsov <ekhramtsov@process-one.net>
 %%%
 %%%
-%%% ejabberd, Copyright (C) 2002-2022   ProcessOne
+%%% ejabberd, Copyright (C) 2002-2025   ProcessOne
 %%%
 %%% This program is free software; you can redistribute it and/or
 %%% modify it under the terms of the GNU General Public License as
@@ -29,9 +29,10 @@
 
 %% API
 -export([init/2, remove_user/2, remove_room/3, delete_old_messages/3,
-	 extended_fields/0, store/8, write_prefs/4, get_prefs/2, select/7, export/1, remove_from_archive/3,
+	 extended_fields/0, store/10, write_prefs/4, get_prefs/2, select/7, export/1, remove_from_archive/3,
 	 is_empty_for_user/2, is_empty_for_room/3, select_with_mucsub/6,
 	 delete_old_messages_batch/4, count_messages_to_delete/3]).
+-export([sql_schemas/0]).
 
 -include_lib("stdlib/include/ms_transform.hrl").
 -include_lib("xmpp/include/xmpp.hrl").
@@ -43,8 +44,112 @@
 %%%===================================================================
 %%% API
 %%%===================================================================
-init(_Host, _Opts) ->
+init(Host, _Opts) ->
+    ejabberd_sql_schema:update_schema(Host, ?MODULE, sql_schemas()),
     ok.
+
+sql_schemas() ->
+    [#sql_schema{
+        version = 2,
+        tables =
+            [#sql_table{
+                name = <<"archive">>,
+                columns =
+                    [#sql_column{name = <<"username">>, type = text},
+                     #sql_column{name = <<"server_host">>, type = text},
+                     #sql_column{name = <<"timestamp">>, type = bigint},
+                     #sql_column{name = <<"peer">>, type = text},
+                     #sql_column{name = <<"bare_peer">>, type = text},
+                     #sql_column{name = <<"xml">>, type = {text, big}},
+                     #sql_column{name = <<"txt">>, type = {text, big}},
+                     #sql_column{name = <<"id">>, type = bigserial},
+                     #sql_column{name = <<"kind">>, type = {text, 10}},
+                     #sql_column{name = <<"nick">>, type = text},
+                     #sql_column{name = <<"origin_id">>, type = text},
+                     #sql_column{name = <<"created_at">>, type = timestamp,
+                                 default = true}],
+                indices = [#sql_index{
+                              columns = [<<"server_host">>, <<"username">>, <<"timestamp">>]},
+                           #sql_index{
+                              columns = [<<"server_host">>, <<"username">>, <<"peer">>]},
+                           #sql_index{
+                              columns = [<<"server_host">>, <<"username">>, <<"bare_peer">>]},
+                           #sql_index{
+                              columns = [<<"server_host">>, <<"timestamp">>]},
+                           #sql_index{
+                              columns = [<<"server_host">>, <<"username">>, <<"origin_id">>]}
+                          ],
+                post_create =
+                    fun(#sql_schema_info{db_type = mysql}) ->
+                            [<<"CREATE FULLTEXT INDEX i_archive_txt ON archive(txt);">>];
+                       (_) ->
+                            []
+                    end},
+             #sql_table{
+                name = <<"archive_prefs">>,
+                columns =
+                    [#sql_column{name = <<"username">>, type = text},
+                     #sql_column{name = <<"server_host">>, type = text},
+                     #sql_column{name = <<"def">>, type = text},
+                     #sql_column{name = <<"always">>, type = text},
+                     #sql_column{name = <<"never">>, type = text},
+                     #sql_column{name = <<"created_at">>, type = timestamp,
+                                 default = true}],
+                indices = [#sql_index{
+                              columns = [<<"server_host">>, <<"username">>],
+                              unique = true}]}],
+        update =
+            [{add_column, <<"archive">>, <<"origin_id">>},
+             {create_index, <<"archive">>,
+              [<<"server_host">>, <<"username">>, <<"origin_id">>]}
+            ]},
+     #sql_schema{
+        version = 1,
+        tables =
+            [#sql_table{
+                name = <<"archive">>,
+                columns =
+                    [#sql_column{name = <<"username">>, type = text},
+                     #sql_column{name = <<"server_host">>, type = text},
+                     #sql_column{name = <<"timestamp">>, type = bigint},
+                     #sql_column{name = <<"peer">>, type = text},
+                     #sql_column{name = <<"bare_peer">>, type = text},
+                     #sql_column{name = <<"xml">>, type = {text, big}},
+                     #sql_column{name = <<"txt">>, type = {text, big}},
+                     #sql_column{name = <<"id">>, type = bigserial},
+                     #sql_column{name = <<"kind">>, type = {text, 10}},
+                     #sql_column{name = <<"nick">>, type = text},
+                     #sql_column{name = <<"created_at">>, type = timestamp,
+                                 default = true}],
+                indices = [#sql_index{
+                              columns = [<<"server_host">>, <<"username">>, <<"timestamp">>]},
+                           #sql_index{
+                              columns = [<<"server_host">>, <<"username">>, <<"peer">>]},
+                           #sql_index{
+                              columns = [<<"server_host">>, <<"username">>, <<"bare_peer">>]},
+                           #sql_index{
+                              columns = [<<"server_host">>, <<"timestamp">>]}
+                          ],
+                post_create =
+                    fun(#sql_schema_info{db_type = mysql}) ->
+                            ejabberd_sql:sql_query_t(
+                              <<"CREATE FULLTEXT INDEX i_archive_txt ON archive(txt);">>);
+                       (_) ->
+                            ok
+                    end},
+             #sql_table{
+                name = <<"archive_prefs">>,
+                columns =
+                    [#sql_column{name = <<"username">>, type = text},
+                     #sql_column{name = <<"server_host">>, type = text},
+                     #sql_column{name = <<"def">>, type = text},
+                     #sql_column{name = <<"always">>, type = text},
+                     #sql_column{name = <<"never">>, type = text},
+                     #sql_column{name = <<"created_at">>, type = timestamp,
+                                 default = true}],
+                indices = [#sql_index{
+                              columns = [<<"server_host">>, <<"username">>],
+                              unique = true}]}]}].
 
 remove_user(LUser, LServer) ->
     ejabberd_sql:sql_query(
@@ -58,16 +163,24 @@ remove_room(LServer, LName, LHost) ->
     LUser = jid:encode({LName, LHost, <<>>}),
     remove_user(LUser, LServer).
 
+remove_from_archive({LUser, LHost}, LServer, Key) ->
+    remove_from_archive(jid:encode({LUser, LHost, <<>>}), LServer, Key);
 remove_from_archive(LUser, LServer, none) ->
     case ejabberd_sql:sql_query(LServer,
 				?SQL("delete from archive where username=%(LUser)s and %(LServer)H")) of
 	{error, Reason} -> {error, Reason};
 	_ -> ok
     end;
-remove_from_archive(LUser, LServer, WithJid) ->
+remove_from_archive(LUser, LServer, #jid{} = WithJid) ->
     Peer = jid:encode(jid:remove_resource(WithJid)),
     case ejabberd_sql:sql_query(LServer,
 				?SQL("delete from archive where username=%(LUser)s and %(LServer)H and bare_peer=%(Peer)s")) of
+	{error, Reason} -> {error, Reason};
+	_ -> ok
+    end;
+remove_from_archive(LUser, LServer, StanzaId) ->
+    case ejabberd_sql:sql_query(LServer,
+				?SQL("delete from archive where username=%(LUser)s and %(LServer)H and timestamp=%(StanzaId)d")) of
 	{error, Reason} -> {error, Reason};
 	_ -> ok
     end.
@@ -100,21 +213,47 @@ count_messages_to_delete(ServerHost, TimeStamp, Type) ->
 delete_old_messages_batch(ServerHost, TimeStamp, Type, Batch) ->
     TS = misc:now_to_usec(TimeStamp),
     Res =
-    case Type of
-	all ->
-	    ejabberd_sql:sql_query(
-		ServerHost,
-		?SQL("delete from archive"
-		     " where timestamp < %(TS)d and %(ServerHost)H limit %(Batch)d"));
-	_ ->
-	    SType = misc:atom_to_binary(Type),
-	    ejabberd_sql:sql_query(
-		ServerHost,
-		?SQL("delete from archive"
-		     " where timestamp < %(TS)d"
-		     " and kind=%(SType)s"
-		     " and %(ServerHost)H limit %(Batch)d"))
-    end,
+	case Type of
+	    all ->
+		ejabberd_sql:sql_query(
+		    ServerHost,
+		    fun(sqlite, _) ->
+			ejabberd_sql:sql_query_t(
+			    ?SQL("delete from archive where rowid in "
+				 "(select rowid from archive where timestamp < %(TS)d and %(ServerHost)H limit %(Batch)d)"));
+		       (mssql, _) ->
+			   ejabberd_sql:sql_query_t(
+			       ?SQL("delete top(%(Batch)d)§ from archive"
+				    " where timestamp < %(TS)d and %(ServerHost)H"));
+		       (_, _) ->
+			   ejabberd_sql:sql_query_t(
+			       ?SQL("delete from archive"
+				    " where timestamp < %(TS)d and %(ServerHost)H limit %(Batch)d"))
+		    end);
+	    _ ->
+		SType = misc:atom_to_binary(Type),
+		ejabberd_sql:sql_query(
+		    ServerHost,
+		    fun(sqlite,_)->
+			ejabberd_sql:sql_query_t(
+			    ?SQL("delete from archive where rowid in ("
+				 " select rowid from archive where timestamp < %(TS)d"
+				 " and kind=%(SType)s"
+				 " and %(ServerHost)H limit %(Batch)d)"));
+		       (mssql, _)->
+			   ejabberd_sql:sql_query_t(
+			       ?SQL("delete top(%(Batch)d) from archive"
+				    " where timestamp < %(TS)d"
+				    " and kind=%(SType)s"
+				    " and %(ServerHost)H"));
+		       (_,_)->
+			   ejabberd_sql:sql_query_t(
+			       ?SQL("delete from archive"
+				    " where timestamp < %(TS)d"
+				    " and kind=%(SType)s"
+				    " and %(ServerHost)H limit %(Batch)d"))
+		    end)
+	end,
     case Res of
 	{updated, Count} ->
 	    {ok, Count};
@@ -144,7 +283,8 @@ delete_old_messages(ServerHost, TimeStamp, Type) ->
 extended_fields() ->
     [{withtext, <<"">>}].
 
-store(Pkt, LServer, {LUser, LHost}, Type, Peer, Nick, _Dir, TS) ->
+store(Pkt, LServer, {LUser, LHost}, Type, Peer, Nick, _Dir, TS,
+      OriginID, Retract) ->
     SUser = case Type of
 		chat -> LUser;
 		groupchat -> jid:encode({LUser, LHost, <<>>})
@@ -167,8 +307,19 @@ store(Pkt, LServer, {LUser, LHost}, Type, Peer, Nick, _Dir, TS) ->
 	      _ ->
 		  fxml:element_to_binary(Pkt)
 	  end,
-	case SqlType of
-	  mssql -> case ejabberd_sql:sql_query(
+    case Retract of
+        {true, RID} ->
+            ejabberd_sql:sql_query(
+              LServer,
+              ?SQL("delete from archive"
+                   " where username=%(SUser)s"
+                   " and %(LServer)H"
+                   " and bare_peer=%(BarePeer)s"
+                   " and origin_id=%(RID)s"));
+        false -> ok
+    end,
+    case SqlType of
+        mssql -> case ejabberd_sql:sql_query(
 	           LServer,
 	           ?SQL_INSERT(
 	              "archive",
@@ -180,13 +331,14 @@ store(Pkt, LServer, {LUser, LHost}, Type, Peer, Nick, _Dir, TS) ->
 	               "xml=N%(XML)s",
 	               "txt=N%(Body)s",
 	               "kind=%(SType)s",
-	               "nick=%(Nick)s"])) of
+	               "nick=%(Nick)s",
+	               "origin_id=%(OriginID)s"])) of
 		{updated, _} ->
 		    ok;
 		Err ->
 		    Err
 	    end;
-	    _ -> case ejabberd_sql:sql_query(
+        _ -> case ejabberd_sql:sql_query(
 	           LServer,
 	           ?SQL_INSERT(
 	              "archive",
@@ -198,13 +350,14 @@ store(Pkt, LServer, {LUser, LHost}, Type, Peer, Nick, _Dir, TS) ->
 	               "xml=%(XML)s",
 	               "txt=%(Body)s",
 	               "kind=%(SType)s",
-	               "nick=%(Nick)s"])) of
+	               "nick=%(Nick)s",
+	               "origin_id=%(OriginID)s"])) of
 		{updated, _} ->
 		    ok;
 		Err ->
 		    Err
 	    end
-	end.
+    end.
 
 write_prefs(LUser, _LServer, #archive_prefs{default = Default,
 					   never = Never,
@@ -362,10 +515,10 @@ export(_Server) ->
               []
       end},
      {archive_msg,
-      fun(Host, #archive_msg{us ={LUser, LServer},
+      fun([Host | HostTail], #archive_msg{us ={LUser, LServer},
                 id = _ID, timestamp = TS, peer = Peer,
-                type = Type, nick = Nick, packet = Pkt})
-          when LServer == Host ->
+                type = Type, nick = Nick, packet = Pkt, origin_id = OriginID})
+          when (LServer == Host) or ([LServer] == HostTail)  ->
                 TStmp = misc:now_to_usec(TS),
                 SUser = case Type of
                       chat -> LUser;
@@ -388,7 +541,8 @@ export(_Server) ->
 	                     "xml=N%(XML)s",
 	                     "txt=N%(Body)s",
 	                     "kind=%(SType)s",
-	                     "nick=%(Nick)s"])];
+	                     "nick=%(Nick)s",
+                             "origin_id=%(OriginID)s"])];
 	                _ -> [?SQL_INSERT(
 	                    "archive",
 	                    ["username=%(SUser)s",
@@ -399,7 +553,8 @@ export(_Server) ->
 	                     "xml=%(XML)s",
 	                     "txt=%(Body)s",
 	                     "kind=%(SType)s",
-	                     "nick=%(Nick)s"])]
+	                     "nick=%(Nick)s",
+                             "origin_id=%(OriginID)s"])]
 		            end;
          (_Host, _R) ->
               []
@@ -438,6 +593,11 @@ make_sql_query(User, LServer, MAMQuery, RSM, ExtraUsernames) ->
 		  end,
     TopClause = if is_integer(Max), Max >= 0, ODBCType == mssql ->
 			  [<<" TOP ">>, integer_to_binary(Max+1)];
+		     true ->
+			  []
+		  end,
+    SubOrderClause = if LimitClause /= []; TopClause /= [] ->
+			  <<" ORDER BY timestamp DESC ">>;
 		     true ->
 			  []
 		  end,
@@ -528,7 +688,7 @@ make_sql_query(User, LServer, MAMQuery, RSM, ExtraUsernames) ->
 		% XEP-0059: Result Set Management
 		% 2.5 Requesting the Last Page in a Result Set
 		[<<"SELECT">>, UserSel, <<" timestamp, xml, peer, kind, nick FROM (">>,
-		 Query, <<" ORDER BY timestamp DESC ">>,
+		 Query, SubOrderClause,
 		 LimitClause, <<") AS t ORDER BY timestamp ASC;">>];
 	    _ ->
 		[Query, <<" ORDER BY timestamp ASC ">>,

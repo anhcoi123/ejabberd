@@ -6,7 +6,7 @@
 %%% Created : 18 Jan 2003 by Alexey Shchepin <alexey@process-one.net>
 %%%
 %%%
-%%% ejabberd, Copyright (C) 2002-2022   ProcessOne
+%%% ejabberd, Copyright (C) 2002-2025   ProcessOne
 %%%
 %%% This program is free software; you can redistribute it and/or
 %%% modify it under the terms of the GNU General Public License as
@@ -28,7 +28,7 @@
 
 -author('alexey@process-one.net').
 
--protocol({xep, 202, '2.0'}).
+-protocol({xep, 202, '2.0', '2.1.0', "complete", ""}).
 
 -behaviour(gen_mod).
 
@@ -39,13 +39,11 @@
 -include_lib("xmpp/include/xmpp.hrl").
 -include("translate.hrl").
 
-start(Host, _Opts) ->
-    gen_iq_handler:add_iq_handler(ejabberd_local, Host,
-				  ?NS_TIME, ?MODULE, process_local_iq).
+start(_Host, _Opts) ->
+    {ok, [{iq_handler, ejabberd_local, ?NS_TIME, process_local_iq}]}.
 
-stop(Host) ->
-    gen_iq_handler:remove_iq_handler(ejabberd_local, Host,
-				     ?NS_TIME).
+stop(_Host) ->
+    ok.
 
 reload(_Host, _NewOpts, _OldOpts) ->
     ok.

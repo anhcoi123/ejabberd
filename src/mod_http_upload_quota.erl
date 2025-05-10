@@ -5,7 +5,7 @@
 %%% Created : 15 Oct 2015 by Holger Weiss <holger@zedat.fu-berlin.de>
 %%%
 %%%
-%%% ejabberd, Copyright (C) 2015-2022   ProcessOne
+%%% ejabberd, Copyright (C) 2015-2025   ProcessOne
 %%%
 %%% This program is free software; you can redistribute it and/or
 %%% modify it under the terms of the GNU General Public License as
@@ -96,7 +96,7 @@ mod_options(_) ->
 mod_doc() ->
     #{desc =>
           [?T("This module adds quota support for mod_http_upload."), "",
-           ?T("This module depends on 'mod_http_upload'.")],
+           ?T("This module depends on _`mod_http_upload`_.")],
       opts =>
           [{max_days,
             #{value => ?T("Days"),
@@ -126,27 +126,23 @@ mod_doc() ->
                      "user may upload. When this threshold is exceeded, "
                      "ejabberd deletes the oldest files uploaded by that "
                      "user until their disk usage equals or falls below "
-                     "the specified soft quota (see 'access_soft_quota'). "
+                     "the specified soft quota (see also option 'access_soft_quota'). "
                      "The default value is 'hard_upload_quota'.")}}],
       example =>
-	  [{?T("Please note that it's not necessary to specify the "
+	  [{?T("Notice it's not necessary to specify the "
 	       "'access_hard_quota' and 'access_soft_quota' options in order "
 	       "to use the quota feature. You can stick to the default names "
 	       "and just specify access rules such as those in this example:"),
           ["shaper_rules:",
-           "  ...",
            "  soft_upload_quota:",
            "    1000: all # MiB",
            "  hard_upload_quota:",
            "    1100: all # MiB",
-           "  ...",
            "",
            "modules:",
-           "  ...",
            "  mod_http_upload: {}",
            "  mod_http_upload_quota:",
-           "    max_days: 100",
-           "  ..."]}]}.
+           "    max_days: 100"]}]}.
 
 -spec depends(binary(), gen_mod:opts()) -> [{module(), hard | soft}].
 depends(_Host, _Opts) ->

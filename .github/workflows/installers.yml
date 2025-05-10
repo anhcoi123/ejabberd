@@ -21,13 +21,13 @@ on:
 jobs:
   binaries:
     name: Binaries
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     steps:
       - name: Cache build directory
-        uses: actions/cache@v3
+        uses: actions/cache@v4
         with:
           path: ~/build/
-          key: ${{runner.os}}-ct-ng-1.25.0
+          key: ${{runner.os}}-ct-ng-1.27.0
       - name: Install prerequisites
         run: |
           sudo apt-get -qq update
@@ -39,9 +39,9 @@ jobs:
       - name: Install FPM
         run: |
           gem install --no-document --user-install fpm
-          echo $HOME/.gem/ruby/*/bin >> $GITHUB_PATH
+          echo $HOME/.local/share/gem/ruby/*/bin >> $GITHUB_PATH
       - name: Check out repository code
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
         with:
           fetch-depth: 0
       - name: Build binary archives
@@ -55,7 +55,7 @@ jobs:
           mkdir ejabberd-packages
           mv ejabberd_*.deb ejabberd-*.rpm ejabberd-*.run ejabberd-packages
       - name: Upload packages
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: ejabberd-packages
           #
@@ -70,15 +70,15 @@ jobs:
   release:
     name: Release
     needs: [binaries]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     if: github.ref_type == 'tag'
     steps:
       - name: Download packages
-        uses: actions/download-artifact@v3
+        uses: actions/download-artifact@v4
         with:
           name: ejabberd-packages
       - name: Draft Release
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@v2
         with:
           draft: true
           files: ejabberd-packages/*

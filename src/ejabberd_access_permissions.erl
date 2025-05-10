@@ -5,7 +5,7 @@
 %%% Created :  7 Sep 2016 by Paweł Chmielowski <pawel@process-one.net>
 %%%
 %%%
-%%% ejabberd, Copyright (C) 2002-2022   ProcessOne
+%%% ejabberd, Copyright (C) 2002-2025   ProcessOne
 %%%
 %%% This program is free software; you can redistribute it and/or
 %%% modify it under the terms of the GNU General Public License as
@@ -82,7 +82,7 @@ can_access(Cmd, CallerInfo) ->
 	    case matches_definition(Def, Cmd, CallerModule, Tag, Host, CallerInfo) of
 		true ->
 		    ?DEBUG("Command '~p' execution allowed by rule "
-			   "'~ts' (CallerInfo=~p)", [Cmd, Name, CallerInfo]),
+			   "'~ts'~n (CallerInfo=~p)", [Cmd, Name, CallerInfo]),
 		    allow;
 		_ ->
 		    none
@@ -93,7 +93,7 @@ can_access(Cmd, CallerInfo) ->
     case Res of
 	allow -> allow;
 	_ ->
-	    ?DEBUG("Command '~p' execution denied "
+	    ?DEBUG("Command '~p' execution denied~n "
 		   "(CallerInfo=~p)", [Cmd, CallerInfo]),
 	    deny
     end.
@@ -344,10 +344,20 @@ validator(from) ->
     fun(L) when is_list(L) ->
 	    lists:map(
 	      fun({K, V}) -> {(econf:enum([tag]))(K), (econf:binary())(V)};
-		 (A) -> (econf:enum([ejabberd_xmlrpc, mod_cron, mod_http_api, ejabberd_ctl]))(A)
+		 (A) -> (econf:enum([ejabberd_ctl,
+                                     ejabberd_web_admin,
+                                     ejabberd_xmlrpc,
+                                     mod_adhoc_api,
+                                     mod_cron,
+                                     mod_http_api]))(A)
 	      end, lists:flatten(L));
        (A) ->
-	    [(econf:enum([ejabberd_xmlrpc, mod_cron, mod_http_api, ejabberd_ctl]))(A)]
+	    [(econf:enum([ejabberd_ctl,
+                          ejabberd_web_admin,
+                          ejabberd_xmlrpc,
+                          mod_adhoc_api,
+                          mod_cron,
+                          mod_http_api]))(A)]
     end;
 validator(what) ->
     econf:and_then(
@@ -377,6 +387,6 @@ validator() ->
 	fun(Os) ->
 		{proplists:get_value(from, Os, []),
 		 proplists:get_value(who, Os, none),
-		 proplists:get_value(what, Os, [])}
+		 proplists:get_value(what, Os, {none, none})}
 	end),
       [unique]).

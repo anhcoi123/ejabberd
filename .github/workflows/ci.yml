@@ -25,30 +25,20 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        otp: ['19.3', '24', '25.0']
-        include:
-        - otp: '19.3'
-          rebar: 2
-          os: ubuntu-18.04
-        - otp: '24'
-          rebar: 3
-          os: ubuntu-20.04
-        - otp: '25.0'
-          rebar: 3
-          os: ubuntu-20.04
-    runs-on: ${{ matrix.os }}
+        otp: ['25', '26', '27']
+    runs-on: ubuntu-24.04
     services:
       redis:
-        image: redis
+        image: public.ecr.aws/docker/library/redis
         ports:
         - 6379:6379
 
     steps:
 
-    - uses: actions/checkout@v3
+    - uses: actions/checkout@v4
 
     - name: Test shell scripts
-      if: matrix.otp == 24
+      if: matrix.otp == '27'
       run: |
         shellcheck test/ejabberd_SUITE_data/gencerts.sh
         shellcheck tools/captcha.sh
@@ -56,35 +46,38 @@ jobs:
         shellcheck -x ejabberdctl.template
 
     - name: Get specific Erlang/OTP
-      uses: ErlGang/setup-erlang@master
-      if: matrix.otp != 24
+      uses: erlef/setup-beam@v1
       with:
         otp-version: ${{ matrix.otp }}
 
-    - name: Get a compatible Rebar
-      if: matrix.rebar == 2
+    - name: Install MS SQL Server
       run: |
-        rm rebar
-        wget https://github.com/processone/ejabberd/raw/21.12/rebar
-        chmod +x rebar
+        docker run -d -e "ACCEPT_EULA=Y" -e "SA_PASSWORD=ejabberd_Test1" \
+                   -v $(pwd)/test/docker/db/mssql/initdb/initdb_mssql.sql:/initdb_mssql.sql:ro \
+                   -v $(pwd)/sql/mssql.sql:/mssql.sql:ro \
+                   -v $(pwd)/sql/mssql.new.sql:/mssql.new.sql:ro \
+                   -p 1433:1433 --name ejabberd-mssql "mcr.microsoft.com/mssql/server:2019-latest"
+        sleep 10
 
     - name: Prepare databases
       run: |
+        docker exec ejabberd-mssql /opt/mssql-tools18/bin/sqlcmd -C -U SA -P ejabberd_Test1 -S localhost -i /initdb_mssql.sql
+        docker exec ejabberd-mssql /opt/mssql-tools18/bin/sqlcmd -C -U SA -P ejabberd_Test1 -S localhost -d ejabberd_test -i /mssql.sql
         sudo systemctl start mysql.service
         sudo systemctl start postgresql.service
+        mysql -u root -proot -e "CREATE DATABASE ejabberd_test;"
         mysql -u root -proot -e "CREATE USER 'ejabberd_test'@'localhost'
                                  IDENTIFIED BY 'ejabberd_test';"
-        mysql -u root -proot -e "CREATE DATABASE ejabberd_test;"
         mysql -u root -proot -e "GRANT ALL ON ejabberd_test.*
                                  TO 'ejabberd_test'@'localhost';"
-        mysql -u root -proot ejabberd_test < sql/mysql.sql
         pg_isready
+        sudo -u postgres psql -c "CREATE DATABASE ejabberd_test;"
         sudo -u postgres psql -c "CREATE USER ejabberd_test
                                   WITH PASSWORD 'ejabberd_test';"
-        sudo -u postgres psql -c "CREATE DATABASE ejabberd_test;"
-        sudo -u postgres psql ejabberd_test -f sql/pg.sql
         sudo -u postgres psql -c "GRANT ALL PRIVILEGES
                                   ON DATABASE ejabberd_test TO ejabberd_test;"
+        sudo -u postgres psql -c "GRANT ALL ON SCHEMA public TO ejabberd_test;"
+        sudo -u postgres psql -c "ALTER DATABASE ejabberd_test OWNER TO ejabberd_test;"
         sudo -u postgres psql ejabberd_test -c "GRANT ALL PRIVILEGES ON ALL
                                                 TABLES IN SCHEMA public
                                                 TO ejabberd_test;"
@@ -99,66 +92,36 @@ jobs:
         sudo apt-get -qq install libexpat1-dev libgd-dev libpam0g-dev \
                                  libsqlite3-dev libwebp-dev libyaml-dev
 
-    - name: Prepare rebar
-      run: |
-        echo '{xref_ignores, [{eldap_filter_yecc, return_error, 2}
-                             ]}.' >>rebar.config
-        echo '{xref_checks, [deprecated_function_calls, deprecated_functions,
-              locals_not_used, undefined_function_calls, undefined_functions]}.
-              % Disabled: exports_not_used,' >>rebar.config
-        echo '{dialyzer, [{get_warnings, true}, {plt_extra_apps, [cache_tab,
-              eimp, epam, esip, ezlib, fast_tls, fast_xml, fast_yaml,
-              mqtree, p1_acme, p1_mysql, p1_oauth2, p1_pgsql, p1_utils, pkix,
-              sqlite3, stringprep, stun, xmpp, yconf]} ]}.' >>rebar.config
-        echo '{ct_extra_params, "-verbosity 20"}.' >>rebar.config
-        echo "{ct_opts, [{verbosity, 20}, {keep_logs, 20}]}." >>rebar.config
-
     - name: Remove syntax_tools from release
       run: sed -i 's|, syntax_tools||g' src/ejabberd.app.src.script
 
-    - name: Cache rebar
-      uses: actions/cache@v3
+    - name: Cache Hex.pm
+      uses: actions/cache@v4
       with:
         path: |
-          deps/
-          dialyzer/
-          ebin/
           ~/.cache/rebar3/
-        key: ${{matrix.otp}}-${{matrix.rebar}}-${{hashFiles('rebar.config')}}
-
-    - name: Download test logs
-      if: matrix.otp == 24 && github.repository == 'processone/ejabberd'
-      continue-on-error: true
-      run: |
-        mkdir -p _build/test
-        curl -sSL https://github.com/processone/ecil/tarball/gh-pages |
-          tar -C _build/test --strip-components=1 --wildcards -xzf -
-        rm -rf _build/test/logs/last/
+        key: ${{matrix.otp}}-${{hashFiles('rebar.config')}}
 
     - name: Compile
       run: |
         ./autogen.sh
-        [[ ${{ matrix.rebar }} = 2 ]] && REBAR=rebar || REBAR=`which rebar3`
-        ./configure --with-rebar=$REBAR \
+        ./configure --with-rebar=./rebar3 \
                     --prefix=/tmp/ejabberd \
                     --enable-all \
                     --disable-elixir \
                     --disable-mssql \
                     --disable-odbc
-        make update
         make
 
     - run: make install -s
     - run: make hooks
     - run: make options
     - run: make xref
-    - run: |
-        make dialyzer
-        [ ${{ matrix.rebar }} = 3 ] && true \
-          || { cat dialyzer/error.log ; test ! -s dialyzer/error.log ; }
+    - run: make dialyzer
+    - run: make test-eunit
+    - run: make elvis
 
     - name: Check Production Release
-      if: matrix.rebar == 3
       run: |
         make rel
         RE=_build/prod/rel/ejabberd
@@ -169,37 +132,50 @@ jobs:
         cat $RE/logs/ejabberd.log
         grep -q "is stopped in" $RE/logs/ejabberd.log
 
-    - name: Check Development Release
-      if: matrix.rebar == 3
+    - name: Start Development Release
       run: |
         make dev
         RE=_build/dev/rel/ejabberd
+        sed -i 's/starttls_required: true/starttls_required: false/g'  $RE/conf/ejabberd.yml
         $RE/bin/ejabberdctl start
         $RE/bin/ejabberdctl started
+        $RE/bin/ejabberdctl register admin localhost admin
+        grep -q "is started in" $RE/logs/ejabberd.log
+
+    - name: Run XMPP Interoperability Tests against CI server.
+      if: matrix.otp == '27'
+      continue-on-error: true
+      uses: XMPP-Interop-Testing/xmpp-interop-tests-action@v1.5.0
+      with:
+        domain: 'localhost'
+        adminAccountUsername: 'admin'
+        adminAccountPassword: 'admin'
+        disabledSpecifications: RFC6121,XEP-0030,XEP-0045,XEP-0054,XEP-0060,XEP-0080,XEP-0115,XEP-0118,XEP-0215,XEP-0347,XEP-0363,XEP-0384
+
+    - name: Stop Development Release
+      if: always()
+      run: |
+        RE=_build/dev/rel/ejabberd
         $RE/bin/ejabberdctl stop
         $RE/bin/ejabberdctl stopped
         cat $RE/logs/ejabberd.log
         grep -q "is stopped in" $RE/logs/ejabberd.log
 
-    - name: Run tests (OTP 19.3)
-      if: matrix.otp == '19.3'
-      id: ct2
-      run: make test
     - name: Run tests
-      if: matrix.otp != '19.3'
       id: ct
       run: |
         (cd priv && ln -sf ../sql)
+        sed -i -e 's/ct:pal/ct:log/' test/suite.erl
         COMMIT=`echo $GITHUB_SHA | cut -c 1-7`
         DATE=`date +%s`
         REF_NAME=`echo $GITHUB_REF_NAME | tr "/" "_"`
         NODENAME=$DATE@$GITHUB_RUN_NUMBER-$GITHUB_ACTOR-$REF_NAME-$COMMIT
         LABEL=`git show -s --format=%s | cut -c 1-30`
-        rebar3 ct --name $NODENAME --label "$LABEL"
-        rebar3 cover
+        ./rebar3 ct --name $NODENAME --label "$LABEL"
+        ./rebar3 cover
 
     - name: Check results
-      if: always() && (steps.ct.outcome != 'skipped' || steps.ct2.outcome != 'skipped')
+      if: always() && (steps.ct.outcome != 'skipped')
       id: ctresults
       run: |
         [[ -d _build ]] && ln -s _build/test/logs/last/ logs || true
@@ -217,11 +193,11 @@ jobs:
         find logs/ -name exunit.log -exec cat '{}' ';'
 
     - name: Send to coveralls
-      if: matrix.otp == 24
+      if: matrix.otp == '27'
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       run: |
-        DIAGNOSTIC=1 rebar3 as test coveralls send
+        DIAGNOSTIC=1 ./rebar3 as test coveralls send
         curl -v -k https://coveralls.io/webhook \
              --header "Content-Type: application/json" \
              --data '{"repo_name":"$GITHUB_REPOSITORY",
@@ -229,36 +205,60 @@ jobs:
                       "payload":{"build_num":$GITHUB_RUN_ID,
                                  "status":"done"}}'
 
-    - name: Upload test logs
-      if: always() && steps.ct.outcome == 'failure' && github.repository == 'processone/ejabberd'
-      uses: peaceiris/actions-gh-pages@v3
+    - name: Check for changes to trigger schema upgrade test
+      uses: dorny/paths-filter@v3
+      id: filter
       with:
-        publish_dir: _build/test
-        exclude_assets: '.github,lib,plugins'
-        external_repository: processone/ecil
-        deploy_key: ${{ secrets.ACTIONS_DEPLOY_KEY }}
-        keep_files: true
+        filters: |
+          sql:
+            - 'sql/**'
+            - 'src/mod_admin_update_sql.erl'
 
-    - name: View ECIL address
-      if: always() && steps.ct.outcome == 'failure' && github.repository == 'processone/ejabberd'
+    - name: Prepare for schema upgrade test
+      id: prepupgradetest
+      if: ${{ steps.filter.outputs.sql == 'true' }}
       run: |
-        CTRUN=`ls -la _build/test/logs/last | sed 's|.*-> ||'`
-        echo "::notice::View CT results: https://processone.github.io/ecil/logs/$CTRUN/"
+        [[ -d logs ]] && rm -rf logs
+        [[ -d _build/test/logs ]] && rm -rf _build/test/logs || true
+        sed -i 's|update_sql, false|update_sql, true|g' test/suite.erl
+    - name: Run DB tests on upgraded schema (mssql, mysql, pgsql)
+      run: CT_BACKENDS=mssql,mysql,pgsql make test
+      if: always() && steps.prepupgradetest.outcome != 'skipped'
+      id: ctupgradedschema
+    - name: Check results
+      if: always() && steps.ctupgradedschema.outcome != 'skipped'
+      run: |
+        [[ -d _build ]] && ln -s _build/test/logs/last/ logs || true
+        ln `find logs/ -name suite.log` logs/suite.log
+        grep 'TEST COMPLETE' logs/suite.log
+        grep -q 'TEST COMPLETE,.* 0 failed' logs/suite.log
+        test $(find logs/ -empty -name error.log)
+    - name: View logs failures
+      if: failure() && steps.ctupgradedschema.outcome != 'skipped'
+      run: |
+        cat logs/suite.log | awk \
+          'BEGIN{RS="\n=case";FS="\n"} /=result\s*failed/ {print "=case" $0}'
+        find logs/ -name error.log -exec cat '{}' ';'
+        find logs/ -name exunit.log -exec cat '{}' ';'
 
     - name: Prepare new schema
       run: |
         [[ -d logs ]] && rm -rf logs
         [[ -d _build/test/logs ]] && rm -rf _build/test/logs || true
+        docker exec ejabberd-mssql /opt/mssql-tools18/bin/sqlcmd -C -U SA -P ejabberd_Test1 -S localhost -Q "drop database [ejabberd_test];"
+        docker exec ejabberd-mssql /opt/mssql-tools18/bin/sqlcmd -C -U SA -P ejabberd_Test1 -S localhost -Q "drop login [ejabberd_test];"
         mysql -u root -proot -e "DROP DATABASE ejabberd_test;"
         sudo -u postgres psql -c "DROP DATABASE ejabberd_test;"
+        docker exec ejabberd-mssql /opt/mssql-tools18/bin/sqlcmd -C -U SA -P ejabberd_Test1 -S localhost -i /initdb_mssql.sql
+        docker exec ejabberd-mssql /opt/mssql-tools18/bin/sqlcmd -C -U SA -P ejabberd_Test1 -S localhost -d ejabberd_test -i /mssql.new.sql
         mysql -u root -proot -e "CREATE DATABASE ejabberd_test;"
         mysql -u root -proot -e "GRANT ALL ON ejabberd_test.*
                                  TO 'ejabberd_test'@'localhost';"
-        mysql -u root -proot ejabberd_test < sql/mysql.new.sql
         sudo -u postgres psql -c "CREATE DATABASE ejabberd_test;"
-        sudo -u postgres psql ejabberd_test -f sql/pg.new.sql
         sudo -u postgres psql -c "GRANT ALL PRIVILEGES
                                   ON DATABASE ejabberd_test TO ejabberd_test;"
+        sudo -u postgres psql -c "GRANT ALL ON SCHEMA public TO ejabberd_test;"
+        sudo -u postgres psql -c "ALTER DATABASE ejabberd_test OWNER TO ejabberd_test;"
         sudo -u postgres psql ejabberd_test -c "GRANT ALL PRIVILEGES ON ALL
                                                 TABLES IN SCHEMA public
                                                 TO ejabberd_test;"
@@ -266,7 +266,8 @@ jobs:
                                                 SEQUENCES IN SCHEMA public
                                                 TO ejabberd_test;"
         sed -i 's|new_schema, false|new_schema, true|g' test/suite.erl
-    - run: CT_BACKENDS=mysql,pgsql make test
+    - name: Run DB tests on new schema (mssql, mysql, pgsql)
+      run: CT_BACKENDS=mssql,mysql,pgsql make test
       id: ctnewschema
     - name: Check results
       if: always() && steps.ctnewschema.outcome != 'skipped'
@@ -283,3 +284,17 @@ jobs:
           'BEGIN{RS="\n=case";FS="\n"} /=result\s*failed/ {print "=case" $0}'
         find logs/ -name error.log -exec cat '{}' ';'
         find logs/ -name exunit.log -exec cat '{}' ';'
+
+    - name: Upload CT logs
+      if: failure()
+      uses: actions/upload-artifact@v4
+      with:
+        name: ejabberd-ct-logs-${{matrix.otp}}
+        #
+        # Appending the wildcard character ("*") is a trick to make
+        # "ejabberd-packages" the root directory of the uploaded ZIP file:
+        #
+        # https://github.com/actions/upload-artifact#upload-using-multiple-paths-and-exclusions
+        #
+        path: _build/test/logs
+        retention-days: 14

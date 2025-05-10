@@ -22,6 +22,7 @@ define_macro:
         db_type: sql
         ram_db_type: sql
         vcard: VCARD
+      mod_muc_occupantid: []
       mod_offline:
         use_cache: true
         db_type: sql
@@ -69,3 +70,11 @@ Welcome to this XMPP server."
       mod_stats: []
       mod_time: []
       mod_version: []
+      mod_mix:
+        db_type: sql
+      mod_mix_pam:
+        db_type: sql
+      mod_mqtt:
+        db_type: sql
+      mod_shared_roster:
+        db_type: sql

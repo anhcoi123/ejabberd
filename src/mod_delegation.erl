@@ -4,7 +4,7 @@
 %%% Purpose : XEP-0355: Namespace Delegation
 %%%
 %%%
-%%% ejabberd, Copyright (C) 2002-2022   ProcessOne
+%%% ejabberd, Copyright (C) 2002-2025   ProcessOne
 %%%
 %%% This program is free software; you can redistribute it and/or
 %%% modify it under the terms of the GNU General Public License as
@@ -25,7 +25,7 @@
 
 -author('amuhar3@gmail.com').
 
--protocol({xep, 0355, '0.4.1'}).
+-protocol({xep, 355, '0.4.1', '16.09', "complete", ""}).
 
 -behaviour(gen_server).
 -behaviour(gen_mod).
@@ -117,7 +117,7 @@ mod_doc() ->
 	  [{?T("Make sure you do not delegate the same namespace to several "
 	       "services at the same time. As in the example provided later, "
 	       "to have the 'sat-pubsub.example.org' component perform "
-	       "correctly disable the 'mod_pubsub' module."),
+	       "correctly disable the _`mod_pubsub`_ module."),
           ["access_rules:",
            "  external_pubsub:",
            "    allow: external_component",
@@ -129,7 +129,6 @@ mod_doc() ->
            "    server: sat-pubsub.example.org",
            "",
            "modules:",
-           "  ...",
            "  mod_delegation:",
            "    namespaces:",
            "      urn:xmpp:mam:1:",

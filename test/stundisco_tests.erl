@@ -3,7 +3,7 @@
 %%% Created : 22 Apr 2020 by Holger Weiss <holger@zedat.fu-berlin.de>
 %%%
 %%%
-%%% ejabberd, Copyright (C) 2020-2022   ProcessOne
+%%% ejabberd, Copyright (C) 2020-2025   ProcessOne
 %%%
 %%% This program is free software; you can redistribute it and/or
 %%% modify it under the terms of the GNU General Public License as
@@ -132,18 +132,17 @@ turn_credentials(Config) ->
 						port = Port,
 						type = Type}]},
     #iq{type = result,
-	sub_els = [#services{
-		      type = undefined,
-		      list = [#service{host = Host,
-				       port = Port,
-				       type = Type,
-				       transport = Transport,
-				       restricted = true,
-				       username = Username,
-				       password = Password,
-				       expires = Expires,
-				       action = undefined,
-				       xdata = undefined}]}]} =
+	sub_els = [#credentials{
+		      services = [#service{host = Host,
+					   port = Port,
+					   type = Type,
+					   transport = Transport,
+					   restricted = true,
+					   username = Username,
+					   password = Password,
+					   expires = Expires,
+					   action = undefined,
+					   xdata = undefined}]}]} =
 	send_recv(Config, #iq{type = get, to = ServerJID, sub_els = [Request]}),
     true = check_password(Username, Password),
     true = check_expires(Expires),
@@ -159,18 +158,17 @@ turns_credentials(Config) ->
 						port = Port,
 						type = Type}]},
     #iq{type = result,
-	sub_els = [#services{
-		      type = undefined,
-		      list = [#service{host = Host,
-				       port = Port,
-				       type = Type,
-				       transport = Transport,
-				       restricted = true,
-				       username = Username,
-				       password = Password,
-				       expires = Expires,
-				       action = undefined,
-				       xdata = undefined}]}]} =
+	sub_els = [#credentials{
+		      services = [#service{host = Host,
+					   port = Port,
+					   type = Type,
+					   transport = Transport,
+					   restricted = true,
+					   username = Username,
+					   password = Password,
+					   expires = Expires,
+					   action = undefined,
+					   xdata = undefined}]}]} =
 	send_recv(Config, #iq{type = get, to = ServerJID, sub_els = [Request]}),
     true = check_password(Username, Password),
     true = check_expires(Expires),

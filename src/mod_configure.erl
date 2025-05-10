@@ -1,11 +1,11 @@
 %%%----------------------------------------------------------------------
 %%% File    : mod_configure.erl
 %%% Author  : Alexey Shchepin <alexey@process-one.net>
-%%% Purpose : Support for online configuration of ejabberd
+%%% Purpose : Support for online configuration of ejabberd using XEP-0050
 %%% Created : 19 Jan 2003 by Alexey Shchepin <alexey@process-one.net>
 %%%
 %%%
-%%% ejabberd, Copyright (C) 2002-2022   ProcessOne
+%%% ejabberd, Copyright (C) 2002-2025   ProcessOne
 %%%
 %%% This program is free software; you can redistribute it and/or
 %%% modify it under the terms of the GNU General Public License as
@@ -27,7 +27,7 @@
 
 -author('alexey@process-one.net').
 
--protocol({xep, 133, '1.1'}).
+-protocol({xep, 133, '1.3.0', '13.10', "partial", ""}).
 
 -behaviour(gen_mod).
 
@@ -36,6 +36,7 @@
 	 adhoc_local_items/4, adhoc_local_commands/4,
 	 get_sm_identity/5, get_sm_features/5, get_sm_items/5,
 	 adhoc_sm_items/4, adhoc_sm_commands/4, mod_options/1,
+	 mod_opt_type/1,
 	 depends/2, mod_doc/0]).
 
 -include("logger.hrl").
@@ -44,50 +45,20 @@
 -include("translate.hrl").
 -include_lib("stdlib/include/ms_transform.hrl").
 
-start(Host, _Opts) ->
-    ejabberd_hooks:add(disco_local_items, Host, ?MODULE,
-		       get_local_items, 50),
-    ejabberd_hooks:add(disco_local_features, Host, ?MODULE,
-		       get_local_features, 50),
-    ejabberd_hooks:add(disco_local_identity, Host, ?MODULE,
-		       get_local_identity, 50),
-    ejabberd_hooks:add(disco_sm_items, Host, ?MODULE,
-		       get_sm_items, 50),
-    ejabberd_hooks:add(disco_sm_features, Host, ?MODULE,
-		       get_sm_features, 50),
-    ejabberd_hooks:add(disco_sm_identity, Host, ?MODULE,
-		       get_sm_identity, 50),
-    ejabberd_hooks:add(adhoc_local_items, Host, ?MODULE,
-		       adhoc_local_items, 50),
-    ejabberd_hooks:add(adhoc_local_commands, Host, ?MODULE,
-		       adhoc_local_commands, 50),
-    ejabberd_hooks:add(adhoc_sm_items, Host, ?MODULE,
-		       adhoc_sm_items, 50),
-    ejabberd_hooks:add(adhoc_sm_commands, Host, ?MODULE,
-		       adhoc_sm_commands, 50),
-    ok.
+start(_Host, _Opts) ->
+    {ok, [{hook, disco_local_items, get_local_items, 50},
+          {hook, disco_local_features, get_local_features, 50},
+          {hook, disco_local_identity, get_local_identity, 50},
+          {hook, disco_sm_items, get_sm_items, 50},
+          {hook, disco_sm_features, get_sm_features, 50},
+          {hook, disco_sm_identity, get_sm_identity, 50},
+          {hook, adhoc_local_items, adhoc_local_items, 50},
+          {hook, adhoc_local_commands, adhoc_local_commands, 50},
+          {hook, adhoc_sm_items, adhoc_sm_items, 50},
+          {hook, adhoc_sm_commands, adhoc_sm_commands, 50}]}.
 
-stop(Host) ->
-    ejabberd_hooks:delete(adhoc_sm_commands, Host, ?MODULE,
-			  adhoc_sm_commands, 50),
-    ejabberd_hooks:delete(adhoc_sm_items, Host, ?MODULE,
-			  adhoc_sm_items, 50),
-    ejabberd_hooks:delete(adhoc_local_commands, Host,
-			  ?MODULE, adhoc_local_commands, 50),
-    ejabberd_hooks:delete(adhoc_local_items, Host, ?MODULE,
-			  adhoc_local_items, 50),
-    ejabberd_hooks:delete(disco_sm_identity, Host, ?MODULE,
-			  get_sm_identity, 50),
-    ejabberd_hooks:delete(disco_sm_features, Host, ?MODULE,
-			  get_sm_features, 50),
-    ejabberd_hooks:delete(disco_sm_items, Host, ?MODULE,
-			  get_sm_items, 50),
-    ejabberd_hooks:delete(disco_local_identity, Host,
-			  ?MODULE, get_local_identity, 50),
-    ejabberd_hooks:delete(disco_local_features, Host,
-			  ?MODULE, get_local_features, 50),
-    ejabberd_hooks:delete(disco_local_items, Host, ?MODULE,
-			  get_local_items, 50).
+stop(_Host) ->
+    ok.
 
 reload(_Host, _NewOpts, _OldOpts) ->
     ok.
@@ -121,6 +92,10 @@ depends(_Host, _Opts) ->
 
 -spec tokenize(binary()) -> [binary()].
 tokenize(Node) -> str:tokens(Node, <<"/#">>).
+
+acl_match_rule(Host, From) ->
+    Access = mod_configure_opt:access(Host),
+    acl:match_rule(Host, Access, From).
 
 -spec get_sm_identity([identity()], jid(), jid(), binary(), binary()) -> [identity()].
 get_sm_identity(Acc, _From, _To, Node, Lang) ->
@@ -163,8 +138,6 @@ get_local_identity(Acc, _From, _To, Node, Lang) ->
 	  ?INFO_COMMAND(?T("Delete User"), Lang);
       ?NS_ADMINL(<<"end-user-session">>) ->
 	  ?INFO_COMMAND(?T("End User Session"), Lang);
-      ?NS_ADMINL(<<"get-user-password">>) ->
-	  ?INFO_COMMAND(?T("Get User Password"), Lang);
       ?NS_ADMINL(<<"change-user-password">>) ->
 	  ?INFO_COMMAND(?T("Change User Password"), Lang);
       ?NS_ADMINL(<<"get-user-lastlogin">>) ->
@@ -199,7 +172,7 @@ get_sm_features(Acc, From,
     case gen_mod:is_loaded(LServer, mod_adhoc) of
       false -> Acc;
       _ ->
-	  Allow = acl:match_rule(LServer, configure, From),
+	  Allow = acl_match_rule(LServer, From),
 	  case Node of
 	    <<"config">> -> ?INFO_RESULT(Allow, [?NS_COMMANDS], Lang);
 	    _ -> Acc
@@ -214,7 +187,7 @@ get_local_features(Acc, From,
       false -> Acc;
       _ ->
 	  LNode = tokenize(Node),
-	  Allow = acl:match_rule(LServer, configure, From),
+	  Allow = acl_match_rule(LServer, From),
 	  case LNode of
 	    [<<"config">>] -> ?INFO_RESULT(Allow, [], Lang);
 	    [<<"user">>] -> ?INFO_RESULT(Allow, [], Lang);
@@ -249,8 +222,6 @@ get_local_features(Acc, From,
 		?INFO_RESULT(Allow, [?NS_COMMANDS], Lang);
 	    ?NS_ADMINL(<<"end-user-session">>) ->
 		?INFO_RESULT(Allow, [?NS_COMMANDS], Lang);
-	    ?NS_ADMINL(<<"get-user-password">>) ->
-		?INFO_RESULT(Allow, [?NS_COMMANDS], Lang);
 	    ?NS_ADMINL(<<"change-user-password">>) ->
 		?INFO_RESULT(Allow, [?NS_COMMANDS], Lang);
 	    ?NS_ADMINL(<<"get-user-lastlogin">>) ->
@@ -274,7 +245,7 @@ get_local_features(Acc, From,
 		     jid(), jid(), binary()) -> mod_disco:items_acc().
 adhoc_sm_items(Acc, From, #jid{lserver = LServer} = To,
 	       Lang) ->
-    case acl:match_rule(LServer, configure, From) of
+    case acl_match_rule(LServer, From) of
       allow ->
 	  Items = case Acc of
 		    {result, Its} -> Its;
@@ -300,7 +271,7 @@ get_sm_items(Acc, From,
 		    {result, Its} -> Its;
 		    empty -> []
 		  end,
-	  case {acl:match_rule(LServer, configure, From), Node} of
+	  case {acl_match_rule(LServer, From), Node} of
 	    {allow, <<"">>} ->
 		Nodes = [?NODEJID(To, ?T("Configuration"),
 				  <<"config">>),
@@ -329,13 +300,13 @@ get_user_resources(User, Server) ->
 			jid(), jid(), binary()) -> mod_disco:items_acc().
 adhoc_local_items(Acc, From,
 		  #jid{lserver = LServer, server = Server} = To, Lang) ->
-    case acl:match_rule(LServer, configure, From) of
+    case acl_match_rule(LServer, From) of
       allow ->
 	  Items = case Acc of
 		    {result, Its} -> Its;
 		    empty -> []
 		  end,
-	  PermLev = get_permission_level(From),
+	  PermLev = get_permission_level(From, LServer),
 	  Nodes = recursively_get_local_items(PermLev, LServer,
 					      <<"">>, Server, Lang),
 	  Nodes1 = lists:filter(
@@ -382,9 +353,10 @@ recursively_get_local_items(PermLev, LServer, Node,
 	end,
 	Items)).
 
--spec get_permission_level(jid()) -> global | vhost.
-get_permission_level(JID) ->
-    case acl:match_rule(global, configure, JID) of
+-spec get_permission_level(jid(), binary()) -> global | vhost.
+get_permission_level(JID, Host) ->
+    Access = mod_configure_opt:access(Host),
+    case acl:match_rule(global, Access, JID) of
       allow -> global;
       deny -> vhost
     end.
@@ -395,7 +367,7 @@ get_permission_level(JID) ->
 	case Allow of
 	  deny -> Fallback;
 	  allow ->
-	      PermLev = get_permission_level(From),
+	      PermLev = get_permission_level(From, LServer),
 	      case get_local_items({PermLev, LServer}, LNode,
 				   jid:encode(To), Lang)
 		  of
@@ -415,11 +387,11 @@ get_local_items(Acc, From, #jid{lserver = LServer} = To,
 		    {result, Its} -> Its;
 		    empty -> []
 		  end,
-	  Allow = acl:match_rule(LServer, configure, From),
+	  Allow = acl_match_rule(LServer, From),
 	  case Allow of
 	    deny -> {result, Items};
 	    allow ->
-		PermLev = get_permission_level(From),
+		PermLev = get_permission_level(From, LServer),
 		case get_local_items({PermLev, LServer}, [],
 				     jid:encode(To), Lang)
 		    of
@@ -434,7 +406,7 @@ get_local_items(Acc, From, #jid{lserver = LServer} = To,
       false -> Acc;
       _ ->
 	  LNode = tokenize(Node),
-	  Allow = acl:match_rule(LServer, configure, From),
+	  Allow = acl_match_rule(LServer, From),
 	  Err = xmpp:err_forbidden(?T("Access denied by service policy"), Lang),
 	  case LNode of
 	    [<<"config">>] ->
@@ -477,8 +449,6 @@ get_local_items(Acc, From, #jid{lserver = LServer} = To,
 		?ITEMS_RESULT(Allow, LNode, {error, Err});
 	    ?NS_ADMINL(<<"end-user-session">>) ->
 		?ITEMS_RESULT(Allow, LNode, {error, Err});
-	    ?NS_ADMINL(<<"get-user-password">>) ->
-		?ITEMS_RESULT(Allow, LNode, {error, Err});
 	    ?NS_ADMINL(<<"change-user-password">>) ->
 		?ITEMS_RESULT(Allow, LNode, {error, Err});
 	    ?NS_ADMINL(<<"get-user-lastlogin">>) ->
@@ -520,8 +490,6 @@ get_local_items(_Host, [<<"user">>], Server, Lang) ->
 	    (?NS_ADMINX(<<"delete-user">>))),
       ?NODE(?T("End User Session"),
 	    (?NS_ADMINX(<<"end-user-session">>))),
-      ?NODE(?T("Get User Password"),
-	    (?NS_ADMINX(<<"get-user-password">>))),
       ?NODE(?T("Change User Password"),
 	    (?NS_ADMINX(<<"change-user-password">>))),
       ?NODE(?T("Get User Last Login Time"),
@@ -728,7 +696,7 @@ get_stopped_nodes(_Lang) ->
 
 -define(COMMANDS_RESULT(LServerOrGlobal, From, To,
 			Request, Lang),
-	case acl:match_rule(LServerOrGlobal, configure, From) of
+	case acl_match_rule(LServerOrGlobal, From) of
 	  deny -> {error, xmpp:err_forbidden(?T("Access denied by service policy"), Lang)};
 	  allow -> adhoc_local_commands(From, To, Request)
 	end).
@@ -1039,16 +1007,6 @@ get_form(_Host, ?NS_ADMINL(<<"end-user-session">>),
 				   label = tr(Lang, ?T("Jabber ID")),
 				   required = true,
 				   var = <<"accountjid">>}]}};
-get_form(_Host, ?NS_ADMINL(<<"get-user-password">>),
-	 Lang) ->
-    {result,
-     #xdata{title = tr(Lang, ?T("Get User Password")),
-	    type = form,
-	    fields = [?HFIELD(),
-		      #xdata_field{type = 'jid-single',
-				   label = tr(Lang, ?T("Jabber ID")),
-				   var = <<"accountjid">>,
-				   required = true}]}};
 get_form(_Host, ?NS_ADMINL(<<"change-user-password">>),
 	 Lang) ->
     {result,
@@ -1316,7 +1274,7 @@ set_form(From, Host, ?NS_ADMINL(<<"add-user">>), _Lang,
     Server = AccountJID#jid.lserver,
     true = lists:member(Server, ejabberd_option:hosts()),
     true = Server == Host orelse
-	     get_permission_level(From) == global,
+	     get_permission_level(From, Host) == global,
     case ejabberd_auth:try_register(User, Server, Password) of
 	ok -> {result, undefined};
 	{error, exists} -> {error, xmpp:err_conflict()};
@@ -1332,7 +1290,7 @@ set_form(From, Host, ?NS_ADMINL(<<"delete-user">>),
 			     User = JID#jid.luser,
 			     Server = JID#jid.lserver,
 			     true = Server == Host orelse
-				      get_permission_level(From) == global,
+				      get_permission_level(From, Host) == global,
 			     true = ejabberd_auth:user_exists(User, Server),
 			     {User, Server}
 		     end,
@@ -1346,7 +1304,7 @@ set_form(From, Host, ?NS_ADMINL(<<"end-user-session">>),
     JID = jid:decode(AccountString),
     LServer = JID#jid.lserver,
     true = LServer == Host orelse
-	     get_permission_level(From) == global,
+	     get_permission_level(From, Host) == global,
     case JID#jid.lresource of
 	<<>> ->
 	    ejabberd_sm:kick_user(JID#jid.luser, JID#jid.lserver);
@@ -1355,23 +1313,6 @@ set_form(From, Host, ?NS_ADMINL(<<"end-user-session">>),
     end,
     {result, undefined};
 set_form(From, Host,
-	 ?NS_ADMINL(<<"get-user-password">>), Lang, XData) ->
-    AccountString = get_value(<<"accountjid">>, XData),
-    JID = jid:decode(AccountString),
-    User = JID#jid.luser,
-    Server = JID#jid.lserver,
-    true = Server == Host orelse
-	     get_permission_level(From) == global,
-    Password = ejabberd_auth:get_password(User, Server),
-    true = is_binary(Password),
-    {result,
-     #xdata{type = form,
-	    fields = [?HFIELD(),
-		      ?XFIELD('jid-single', ?T("Jabber ID"),
-			      <<"accountjid">>, AccountString),
-		      ?XFIELD('text-single', ?T("Password"),
-			      <<"password">>, Password)]}};
-set_form(From, Host,
 	 ?NS_ADMINL(<<"change-user-password">>), _Lang, XData) ->
     AccountString = get_value(<<"accountjid">>, XData),
     Password = get_value(<<"password">>, XData),
@@ -1379,7 +1320,7 @@ set_form(From, Host,
     User = JID#jid.luser,
     Server = JID#jid.lserver,
     true = Server == Host orelse
-	     get_permission_level(From) == global,
+	     get_permission_level(From, Host) == global,
     true = ejabberd_auth:user_exists(User, Server),
     ejabberd_auth:set_password(User, Server, Password),
     {result, undefined};
@@ -1390,7 +1331,7 @@ set_form(From, Host,
     User = JID#jid.luser,
     Server = JID#jid.lserver,
     true = Server == Host orelse
-	     get_permission_level(From) == global,
+	     get_permission_level(From, Host) == global,
     FLast = case ejabberd_sm:get_user_resources(User,
 						Server)
 		of
@@ -1422,7 +1363,7 @@ set_form(From, Host, ?NS_ADMINL(<<"user-stats">>), Lang,
     User = JID#jid.luser,
     Server = JID#jid.lserver,
     true = Server == Host orelse
-	     get_permission_level(From) == global,
+	     get_permission_level(From, Host) == global,
     Resources = ejabberd_sm:get_user_resources(User,
 					       Server),
     IPs1 = [ejabberd_sm:get_user_ip(User, Server, Resource)
@@ -1513,7 +1454,7 @@ adhoc_sm_commands(_Acc, From,
 		  #jid{user = User, server = Server, lserver = LServer},
 		  #adhoc_command{lang = Lang, node = <<"config">>,
 				 action = Action, xdata = XData} = Request) ->
-    case acl:match_rule(LServer, configure, From) of
+    case acl_match_rule(LServer, From) of
 	deny ->
 	    {error, xmpp:err_forbidden(?T("Access denied by service policy"), Lang)};
 	allow ->
@@ -1595,11 +1536,76 @@ set_sm_form(_User, _Server, _Node, _Request) ->
 tr(Lang, Text) ->
     translate:translate(Lang, Text).
 
-mod_options(_) -> [].
+-spec mod_opt_type(atom()) -> econf:validator().
+mod_opt_type(access) ->
+    econf:acl().
+
+-spec mod_options(binary()) -> [{services, [tuple()]} | {atom(), any()}].
+mod_options(_Host) ->
+    [{access, configure}].
+
+%% @format-begin
+
+%% All ad-hoc commands implemented by mod_configure are available as API Commands:
+%% - add-user                  -> register
+%% - delete-user               -> unregister
+%% - end-user-session          -> kick_session / kick_user
+%% - change-user-password      -> change_password
+%% - get-user-lastlogin        -> get_last
+%% - user-stats                -> user_sessions_info
+%% - get-registered-users-list -> registered_users
+%% - get-registered-users-num  -> stats
+%% - get-online-users-list     -> connected_users
+%% - get-online-users-num      -> stats
+%% - stopped nodes             -> list_cluster_detailed
+%% - DB                        -> mnesia_list_tables and mnesia_table_change_storage
+%% - restart                   -> stop_kindly / restart
+%% - shutdown                  -> stop_kindly
+%% - backup                    -> backup
+%% - restore                   -> restore
+%% - textfile                  -> dump
+%% - import/file               -> import_file
+%% - import/dir                -> import_dir
+%%
+%% An exclusive feature available only in this module is to list items and discover them:
+%% - outgoing s2s
+%% - online users
+%% - all users
 
 mod_doc() ->
     #{desc =>
-          ?T("The module provides server configuration functionality via "
-             "https://xmpp.org/extensions/xep-0050.html"
-             "[XEP-0050: Ad-Hoc Commands]. This module requires "
-             "_`mod_adhoc`_ to be loaded.")}.
+          [?T("The module provides server configuration functionalities using "
+              "https://xmpp.org/extensions/xep-0030.html[XEP-0030: Service Discovery] and "
+              "https://xmpp.org/extensions/xep-0050.html[XEP-0050: Ad-Hoc Commands]:"),
+           "",
+           "- List and discover outgoing s2s, online client sessions and all registered accounts",
+           "- Most of the ad-hoc commands defined in https://xmpp.org/extensions/xep-0133.html[XEP-0133: Service Administration]",
+           "- Additional custom ad-hoc commands specific to ejabberd",
+           "",
+           ?T("This module requires _`mod_adhoc`_ (to execute the commands), "
+              "and recommends _`mod_disco`_ (to discover the commands). "),
+           "",
+           ?T("Please notice that all the ad-hoc commands implemented by this module "
+              "have an equivalent "
+              "https://docs.ejabberd.im/developer/ejabberd-api/[API Command] "
+              "that you can execute using _`mod_adhoc_api`_ or any other API frontend.")],
+      opts =>
+          [{access,
+            #{value => ?T("AccessName"),
+              note => "added in 25.03",
+              desc =>
+                  ?T("This option defines which access rule will be used to "
+                     "control who is allowed to access the features provided by this module. "
+                     "The default value is 'configure'.")}}],
+      example =>
+          ["acl:",
+           "  admin:",
+           "    user: sun@localhost",
+           "",
+           "access_rules:",
+           "  configure:",
+           "    allow: admin",
+           "",
+           "modules:",
+           "  mod_configure:",
+           "    access: configure"]}.

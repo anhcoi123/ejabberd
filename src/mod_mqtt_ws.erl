@@ -1,6 +1,6 @@
 %%%-------------------------------------------------------------------
 %%% @author Evgeny Khramtsov <ekhramtsov@process-one.net>
-%%% @copyright (C) 2002-2022 ProcessOne, SARL. All Rights Reserved.
+%%% @copyright (C) 2002-2025 ProcessOne, SARL. All Rights Reserved.
 %%%
 %%% Licensed under the Apache License, Version 2.0 (the "License");
 %%% you may not use this file except in compliance with the License.
@@ -27,7 +27,7 @@
 -export([peername/1, setopts/2, send/2, close/1]).
 %% gen_server callbacks
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2,
-	 terminate/2, code_change/3, format_status/2]).
+	 terminate/2, code_change/3]).
 
 -include_lib("xmpp/include/xmpp.hrl").
 -include("ejabberd_http.hrl").
@@ -131,9 +131,6 @@ terminate(_Reason, State) ->
 
 code_change(_OldVsn, State, _Extra) ->
     {ok, State}.
-
-format_status(_Opt, Status) ->
-    Status.
 
 %%%===================================================================
 %%% Internal functions

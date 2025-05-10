@@ -1,5 +1,5 @@
 --
--- ejabberd, Copyright (C) 2002-2022   ProcessOne
+-- ejabberd, Copyright (C) 2002-2025   ProcessOne
 --
 -- This program is free software; you can redistribute it and/or
 -- modify it under the terms of the GNU General Public License as
@@ -31,6 +31,7 @@ CREATE TABLE [dbo].[archive] (
         [id] [bigint] IDENTITY(1,1) NOT NULL,
         [kind] [varchar] (10) NULL,
         [nick] [varchar] (250) NULL,
+        [origin_id] [varchar] (250) NOT NULL,
         [created_at] [datetime] NOT NULL DEFAULT GETDATE(),
  CONSTRAINT [archive_PK] PRIMARY KEY CLUSTERED
 (
@@ -48,6 +49,9 @@ CREATE INDEX [archive_username_bare_peer] ON [archive] (username, bare_peer)
 WITH (PAD_INDEX = OFF, STATISTICS_NORECOMPUTE = OFF, ALLOW_ROW_LOCKS = ON, ALLOW_PAGE_LOCKS = ON);
 
 CREATE INDEX [archive_timestamp] ON [archive] (timestamp)
+WITH (PAD_INDEX = OFF, STATISTICS_NORECOMPUTE = OFF, ALLOW_ROW_LOCKS = ON, ALLOW_PAGE_LOCKS = ON);
+
+CREATE INDEX [archive_username_origin_id] ON [archive] (username, origin_id)
 WITH (PAD_INDEX = OFF, STATISTICS_NORECOMPUTE = OFF, ALLOW_ROW_LOCKS = ON, ALLOW_PAGE_LOCKS = ON);
 
 CREATE TABLE [dbo].[archive_prefs] (
@@ -118,10 +122,10 @@ CREATE INDEX [muc_room_host_created_at] ON [muc_registered] (host, nick)
     WITH (PAD_INDEX = OFF, STATISTICS_NORECOMPUTE = OFF, ALLOW_ROW_LOCKS = ON, ALLOW_PAGE_LOCKS = ON);
 
 CREATE TABLE [dbo].[muc_online_room] (
-        [name] [varchar] (250) NOT NULL,
-	[host] [varchar] (250) NOT NULL,
-	[node] [text] NOT NULL,
-	[pid] [text] NOT NULL
+    [name] [varchar] (250) NOT NULL,
+    [host] [varchar] (250) NOT NULL,
+    [node] [varchar] (250) NOT NULL,
+    [pid] [varchar] (100) NOT NULL
 );
 
 CREATE UNIQUE CLUSTERED INDEX [muc_online_room_name_host] ON [muc_online_room] (name, host)
@@ -133,12 +137,10 @@ CREATE TABLE [dbo].[muc_online_users] (
     [resource] [varchar] (250) NOT NULL,
     [name] [varchar] (250) NOT NULL,
     [host] [varchar] (250) NOT NULL,
-    node text NOT NULL
+    [node] [varchar] (250) NOT NULL
 );
 
 CREATE UNIQUE INDEX [muc_online_users_i] ON [muc_online_users] (username, server, resource, name, host)
-WITH (PAD_INDEX = OFF, STATISTICS_NORECOMPUTE = OFF, ALLOW_ROW_LOCKS = ON, ALLOW_PAGE_LOCKS = ON);
-CREATE UNIQUE CLUSTERED INDEX [muc_online_users_us] ON [muc_online_users] (username, server)
 WITH (PAD_INDEX = OFF, STATISTICS_NORECOMPUTE = OFF, ALLOW_ROW_LOCKS = ON, ALLOW_PAGE_LOCKS = ON);
 
 CREATE TABLE [dbo].[muc_room_subscribers] (
@@ -174,9 +176,6 @@ CREATE TABLE [dbo].[privacy_list] (
 )WITH (PAD_INDEX = OFF, STATISTICS_NORECOMPUTE = OFF, IGNORE_DUP_KEY = OFF, ALLOW_ROW_LOCKS = ON, ALLOW_PAGE_LOCKS = ON)
 );
 
-CREATE INDEX [privacy_list_username] ON [privacy_list] (username)
-WITH (PAD_INDEX = OFF, STATISTICS_NORECOMPUTE = OFF, ALLOW_ROW_LOCKS = ON, ALLOW_PAGE_LOCKS = ON);
-
 CREATE UNIQUE INDEX [privacy_list_username_name] ON [privacy_list] (username, name)
 WITH (PAD_INDEX = OFF, STATISTICS_NORECOMPUTE = OFF, ALLOW_ROW_LOCKS = ON, ALLOW_PAGE_LOCKS = ON);
 
@@ -203,9 +202,6 @@ CREATE TABLE [dbo].[private_storage] (
         [created_at] [datetime] NOT NULL DEFAULT GETDATE()
 ) TEXTIMAGE_ON [PRIMARY];
 
-CREATE INDEX [private_storage_username] ON [private_storage] (username)
-WITH (PAD_INDEX = OFF, STATISTICS_NORECOMPUTE = OFF, ALLOW_ROW_LOCKS = ON, ALLOW_PAGE_LOCKS = ON);
-
 CREATE UNIQUE CLUSTERED INDEX [private_storage_username_namespace] ON [private_storage] (username, namespace)
 WITH (PAD_INDEX = OFF, STATISTICS_NORECOMPUTE = OFF, ALLOW_ROW_LOCKS = ON, ALLOW_PAGE_LOCKS = ON);
 
@@ -226,9 +222,9 @@ WITH (PAD_INDEX = OFF, STATISTICS_NORECOMPUTE = OFF, ALLOW_ROW_LOCKS = ON, ALLOW
 
 CREATE TABLE [dbo].[pubsub_node_option] (
         [nodeid] [bigint] NULL,
-        [name] [text] NOT NULL,
-        [val] [text] NOT NULL
-) TEXTIMAGE_ON [PRIMARY];
+        [name] [varchar] (250) NOT NULL,
+        [val] [varchar] (250) NOT NULL
+);
 
 CREATE CLUSTERED INDEX [pubsub_node_option_nodeid] ON [pubsub_node_option] (nodeid)
 WITH (PAD_INDEX = OFF, STATISTICS_NORECOMPUTE = OFF, ALLOW_ROW_LOCKS = ON, ALLOW_PAGE_LOCKS = ON);
@@ -272,13 +268,13 @@ CREATE TABLE [dbo].[pubsub_node] (
         [host] [varchar] (255) NOT NULL,
         [node] [varchar] (255) NOT NULL,
         [parent] [varchar] (255) NOT NULL DEFAULT '',
-        [plugin] [text] NOT NULL,
+        [plugin] [varchar] (32) NOT NULL,
         [nodeid] [bigint] IDENTITY(1,1) NOT NULL,
  CONSTRAINT [pubsub_node_PRIMARY] PRIMARY KEY CLUSTERED
 (
         [nodeid] ASC
 )WITH (PAD_INDEX = OFF, STATISTICS_NORECOMPUTE = OFF, IGNORE_DUP_KEY = OFF, ALLOW_ROW_LOCKS = ON, ALLOW_PAGE_LOCKS = ON)
-) TEXTIMAGE_ON [PRIMARY];
+);
 
 CREATE INDEX [pubsub_node_parent] ON [pubsub_node] (parent)
 WITH (PAD_INDEX = OFF, STATISTICS_NORECOMPUTE = OFF, ALLOW_ROW_LOCKS = ON, ALLOW_PAGE_LOCKS = ON);
@@ -319,9 +315,6 @@ CREATE TABLE [dbo].[rosterusers] (
 
 CREATE UNIQUE CLUSTERED INDEX [rosterusers_username_jid] ON [rosterusers] ([username], [jid])
 WITH (PAD_INDEX = OFF, STATISTICS_NORECOMPUTE = OFF, IGNORE_DUP_KEY = OFF, ALLOW_ROW_LOCKS = ON, ALLOW_PAGE_LOCKS = ON);
-
-CREATE INDEX [rosterusers_username] ON [rosterusers] ([username])
-WITH (PAD_INDEX = OFF, STATISTICS_NORECOMPUTE = OFF, ALLOW_ROW_LOCKS = ON, ALLOW_PAGE_LOCKS = ON);
 
 CREATE INDEX [rosterusers_jid] ON [rosterusers] ([jid])
 WITH (PAD_INDEX = OFF, STATISTICS_NORECOMPUTE = OFF, ALLOW_ROW_LOCKS = ON, ALLOW_PAGE_LOCKS = ON);
@@ -366,12 +359,11 @@ WITH (PAD_INDEX = OFF, STATISTICS_NORECOMPUTE = OFF, ALLOW_ROW_LOCKS = ON, ALLOW
 CREATE TABLE [dbo].[sr_group] (
         [name] [varchar] (250) NOT NULL,
         [opts] [text] NOT NULL,
-        [created_at] [datetime] NOT NULL DEFAULT GETDATE(),
- CONSTRAINT [sr_group_PRIMARY] PRIMARY KEY CLUSTERED
-(
-        [name] ASC
-)WITH (PAD_INDEX = OFF, STATISTICS_NORECOMPUTE = OFF, IGNORE_DUP_KEY = OFF, ALLOW_ROW_LOCKS = ON, ALLOW_PAGE_LOCKS = ON)
+        [created_at] [datetime] NOT NULL DEFAULT GETDATE()
 ) TEXTIMAGE_ON [PRIMARY];
+
+CREATE UNIQUE CLUSTERED INDEX [sr_group_name] ON [sr_group] ([name])
+WITH (PAD_INDEX = OFF, STATISTICS_NORECOMPUTE = OFF, IGNORE_DUP_KEY = OFF, ALLOW_ROW_LOCKS = ON, ALLOW_PAGE_LOCKS = ON);
 
 CREATE TABLE [dbo].[sr_user] (
         [jid] [varchar] (250) NOT NULL,
@@ -382,14 +374,12 @@ CREATE TABLE [dbo].[sr_user] (
 CREATE UNIQUE CLUSTERED INDEX [sr_user_jid_group] ON [sr_user] ([jid], [grp])
 WITH (PAD_INDEX = OFF, STATISTICS_NORECOMPUTE = OFF, IGNORE_DUP_KEY = OFF, ALLOW_ROW_LOCKS = ON, ALLOW_PAGE_LOCKS = ON);
 
-CREATE INDEX [sr_user_jid] ON [sr_user] ([jid])
-WITH (PAD_INDEX = OFF, STATISTICS_NORECOMPUTE = OFF, ALLOW_ROW_LOCKS = ON, ALLOW_PAGE_LOCKS = ON);
-
 CREATE INDEX [sr_user_grp] ON [sr_user] ([grp])
 WITH (PAD_INDEX = OFF, STATISTICS_NORECOMPUTE = OFF, ALLOW_ROW_LOCKS = ON, ALLOW_PAGE_LOCKS = ON);
 
 CREATE TABLE [dbo].[users] (
         [username] [varchar] (250) NOT NULL,
+        [type] [smallint] NOT NULL,
         [password] [text] NOT NULL,
         [serverkey] [text] NOT NULL DEFAULT '',
         [salt] [text] NOT NULL DEFAULT '',
@@ -397,7 +387,8 @@ CREATE TABLE [dbo].[users] (
         [created_at] [datetime] NOT NULL DEFAULT GETDATE(),
  CONSTRAINT [users_PRIMARY] PRIMARY KEY CLUSTERED
 (
-        [username] ASC
+        [username] ASC,
+        [type] ASC
 )WITH (PAD_INDEX = OFF, STATISTICS_NORECOMPUTE = OFF, IGNORE_DUP_KEY = OFF, ALLOW_ROW_LOCKS = ON, ALLOW_PAGE_LOCKS = ON)
 ) TEXTIMAGE_ON [PRIMARY];
 
@@ -521,9 +512,6 @@ CREATE TABLE [dbo].[route] (
 CREATE UNIQUE CLUSTERED INDEX [route_i] ON [route] (domain, server_host, node, pid)
 WITH (PAD_INDEX = OFF, STATISTICS_NORECOMPUTE = OFF, ALLOW_ROW_LOCKS = ON, ALLOW_PAGE_LOCKS = ON);
 
-CREATE INDEX [route_domain] ON [route] (domain)
-WITH (PAD_INDEX = OFF, STATISTICS_NORECOMPUTE = OFF, ALLOW_ROW_LOCKS = ON, ALLOW_PAGE_LOCKS = ON);
-
 CREATE TABLE [dbo].[bosh] (
     [sid] [varchar] (255) NOT NULL,
     [node] [varchar] (255) NOT NULL,
@@ -545,25 +533,88 @@ CREATE TABLE [dbo].[push_session] (
 CREATE UNIQUE CLUSTERED INDEX [i_push_usn] ON [push_session] (username, service, node)
 WITH (PAD_INDEX = OFF, STATISTICS_NORECOMPUTE = OFF, ALLOW_ROW_LOCKS = ON, ALLOW_PAGE_LOCKS = ON);
 
-CREATE UNIQUE INDEX [i_push_ut] ON [push_session] (username, timestamp)
+CREATE INDEX [i_push_ut] ON [push_session] (username, timestamp)
+WITH (PAD_INDEX = OFF, STATISTICS_NORECOMPUTE = OFF, ALLOW_ROW_LOCKS = ON, ALLOW_PAGE_LOCKS = ON);
+
+CREATE TABLE [dbo].[mix_channel] (
+    [channel] [varchar] (250) NOT NULL,
+    [service] [varchar] (250) NOT NULL,
+    [username] [varchar] (250) NOT NULL,
+    [domain] [varchar] (250) NOT NULL,
+    [jid] [varchar] (250) NOT NULL,
+    [hidden] [smallint] NOT NULL,
+    [hmac_key] [text] NOT NULL,
+    [created_at] [datetime] NOT NULL DEFAULT GETDATE()
+) TEXTIMAGE_ON [PRIMARY];
+
+CREATE UNIQUE CLUSTERED INDEX [mix_channel] ON [mix_channel] (channel, service)
+WITH (PAD_INDEX = OFF, STATISTICS_NORECOMPUTE = OFF, ALLOW_ROW_LOCKS = ON, ALLOW_PAGE_LOCKS = ON);
+
+CREATE INDEX [mix_channel_serv] ON [mix_channel] (service)
+WITH (PAD_INDEX = OFF, STATISTICS_NORECOMPUTE = OFF, ALLOW_ROW_LOCKS = ON, ALLOW_PAGE_LOCKS = ON);
+
+CREATE TABLE [dbo].[mix_participant] (
+    [channel] [varchar] (250) NOT NULL,
+    [service] [varchar] (250) NOT NULL,
+    [username] [varchar] (250) NOT NULL,
+    [domain] [varchar] (250) NOT NULL,
+    [jid] [varchar] (250) NOT NULL,
+    [id] [text] NOT NULL,
+    [nick] [text] NOT NULL,
+    [created_at] [datetime] NOT NULL DEFAULT GETDATE()
+) TEXTIMAGE_ON [PRIMARY];
+
+CREATE UNIQUE INDEX [mix_participant] ON [mix_participant] (channel, service, username, domain)
+WITH (PAD_INDEX = OFF, STATISTICS_NORECOMPUTE = OFF, ALLOW_ROW_LOCKS = ON, ALLOW_PAGE_LOCKS = ON);
+
+CREATE INDEX [mix_participant_chan_serv] ON [mix_participant] (channel, service)
+WITH (PAD_INDEX = OFF, STATISTICS_NORECOMPUTE = OFF, ALLOW_ROW_LOCKS = ON, ALLOW_PAGE_LOCKS = ON);
+
+CREATE TABLE [dbo].[mix_subscription] (
+    [channel] [varchar] (250) NOT NULL,
+    [service] [varchar] (250) NOT NULL,
+    [username] [varchar] (250) NOT NULL,
+    [domain] [varchar] (250) NOT NULL,
+    [node] [varchar] (250) NOT NULL,
+    [jid] [varchar] (250) NOT NULL
+);
+
+CREATE UNIQUE INDEX [mix_subscription] ON [mix_subscription] (channel, service, username, domain, node)
+WITH (PAD_INDEX = OFF, STATISTICS_NORECOMPUTE = OFF, ALLOW_ROW_LOCKS = ON, ALLOW_PAGE_LOCKS = ON);
+
+CREATE INDEX [mix_subscription_chan_serv_ud] ON [mix_subscription] (channel, service, username, domain)
+WITH (PAD_INDEX = OFF, STATISTICS_NORECOMPUTE = OFF, ALLOW_ROW_LOCKS = ON, ALLOW_PAGE_LOCKS = ON);
+
+CREATE INDEX [mix_subscription_chan_serv_node] ON [mix_subscription] (channel, service, node)
+WITH (PAD_INDEX = OFF, STATISTICS_NORECOMPUTE = OFF, ALLOW_ROW_LOCKS = ON, ALLOW_PAGE_LOCKS = ON);
+
+CREATE INDEX [mix_subscription_chan_serv] ON [mix_subscription] (channel, service)
+WITH (PAD_INDEX = OFF, STATISTICS_NORECOMPUTE = OFF, ALLOW_ROW_LOCKS = ON, ALLOW_PAGE_LOCKS = ON);
+
+CREATE TABLE [dbo].[mix_pam] (
+    [username] [varchar] (250) NOT NULL,
+    [channel] [varchar] (250) NOT NULL,
+    [service] [varchar] (250) NOT NULL,
+    [id] [text] NOT NULL,
+    [created_at] [datetime] NOT NULL DEFAULT GETDATE()
+) TEXTIMAGE_ON [PRIMARY];
+
+CREATE UNIQUE CLUSTERED INDEX [mix_pam] ON [mix_pam] (username, channel, service)
 WITH (PAD_INDEX = OFF, STATISTICS_NORECOMPUTE = OFF, ALLOW_ROW_LOCKS = ON, ALLOW_PAGE_LOCKS = ON);
 
 CREATE TABLE [dbo].[mqtt_pub] (
-	[username] [varchar](191) NOT NULL,
-	[server_host] [varchar](191) NOT NULL,
-	[resource] [varchar](191) NOT NULL,
-	[topic] [varchar](191) NOT NULL,
-	[qos] [tinyint] NOT NULL,
-	[payload] [varbinary](max) NOT NULL,
-	[payload_format] [tinyint] NOT NULL,
-	[content_type] [text] NOT NULL,
-	[response_topic] [text] NOT NULL,
-	[correlation_data] [varbinary](max) NOT NULL,
-	[user_properties] [varbinary](max) NOT NULL,
-	[expiry] [int] NOT NULL,
- CONSTRAINT [i_mqtt_topic_server] PRIMARY KEY CLUSTERED
-(
-	[topic] ASC,
-	[server_host] ASC
-)WITH (PAD_INDEX = OFF, STATISTICS_NORECOMPUTE = OFF, IGNORE_DUP_KEY = OFF, ALLOW_ROW_LOCKS = ON, ALLOW_PAGE_LOCKS = ON, OPTIMIZE_FOR_SEQUENTIAL_KEY = OFF) ON [PRIMARY]
+    [username] [varchar] (250) NOT NULL,
+    [resource] [varchar] (250) NOT NULL,
+    [topic] [varchar] (250) NOT NULL,
+    [qos] [tinyint] NOT NULL,
+    [payload] [varbinary](max) NOT NULL,
+    [payload_format] [tinyint] NOT NULL,
+    [content_type] [text] NOT NULL,
+    [response_topic] [text] NOT NULL,
+    [correlation_data] [varbinary](max) NOT NULL,
+    [user_properties] [varbinary](max) NOT NULL,
+    [expiry] [int] NOT NULL
 ) ON [PRIMARY] TEXTIMAGE_ON [PRIMARY];
+
+CREATE UNIQUE CLUSTERED INDEX [mqtt_topic] ON [mqtt_pub] (topic)
+WITH (PAD_INDEX = OFF, STATISTICS_NORECOMPUTE = OFF, ALLOW_ROW_LOCKS = ON, ALLOW_PAGE_LOCKS = ON);

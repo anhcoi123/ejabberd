@@ -3,7 +3,7 @@
 %%% Created : 14 Nov 2016 by Evgeny Khramtsov <ekhramtsov@process-one.net>
 %%%
 %%%
-%%% ejabberd, Copyright (C) 2002-2022   ProcessOne
+%%% ejabberd, Copyright (C) 2002-2025   ProcessOne
 %%%
 %%% This program is free software; you can redistribute it and/or
 %%% modify it under the terms of the GNU General Public License as
@@ -431,11 +431,20 @@ set_default(Config, Default) ->
 
 send_messages(Config, Range) ->
     Peer = ?config(peer, Config),
+    send_message_extra(Config, 0, <<"to-retract-1">>, []),
     lists:foreach(
-      fun(N) ->
+      fun
+	  (1) ->
+	      send_message_extra(Config, 1, <<"retraction-1">>, [#message_retract{id = <<"to-retract-1">>}]);
+	  (N) ->
 	      Body = xmpp:mk_text(integer_to_binary(N)),
               send(Config, #message{to = Peer, body = Body})
       end, Range).
+
+send_message_extra(Config, N, Id, Sub) ->
+    Peer = ?config(peer, Config),
+    Body = xmpp:mk_text(integer_to_binary(N)),
+    send(Config, #message{id = Id, to = Peer, body = Body, sub_els = Sub}).
 
 recv_messages(Config, Range) ->
     Peer = ?config(peer, Config),
@@ -448,7 +457,7 @@ recv_messages(Config, Range) ->
 		  xmpp:get_subtag(Msg, #mam_archived{}),
 	      #stanza_id{by = BareMyJID} =
 		  xmpp:get_subtag(Msg, #stanza_id{})
-      end, Range).
+      end, [0 | Range]).
 
 recv_archived_messages(Config, From, To, QID, Range) ->
     MyJID = my_jid(Config),
@@ -483,7 +492,7 @@ send_query(Config, #mam_query{xmlns = NS} = Query) ->
     maybe_recv_iq_result(Config, NS, I),
     I.
 
-recv_fin(Config, I, QueryID, NS, IsComplete) when NS == ?NS_MAM_1; NS == ?NS_MAM_2 ->
+recv_fin(Config, I, _QueryID, NS, IsComplete) when NS == ?NS_MAM_1; NS == ?NS_MAM_2 ->
     ct:comment("Receiving fin iq for namespace '~s'", [NS]),
     #iq{type = result, id = I,
 	sub_els = [#mam_fin{xmlns = NS,
@@ -642,7 +651,8 @@ query_rsm_after(Config, From, To, NS) ->
 query_rsm_before(Config, From, To) ->
     lists:foreach(
       fun(NS) ->
-	      query_rsm_before(Config, From, To, NS)
+	  query_rsm_before(Config, From, To, NS),
+	  query_last_message(Config, From, To, NS)
       end, ?VERSIONS).
 
 query_rsm_before(Config, From, To, NS) ->
@@ -660,6 +670,16 @@ query_rsm_before(Config, From, To, NS) ->
 	      match_rsm_count(RSM, 5),
 	      Last
       end, <<"">>, lists:reverse([lists:seq(1, N) || N <- lists:seq(0, 5)])).
+
+query_last_message(Config, From, To, NS) ->
+    ct:comment("Retrieving last message", []),
+    QID = p1_rand:get_string(),
+    Query = #mam_query{xmlns = NS, id = QID,
+		       rsm = #rsm_set{before = <<>>, max = 1}},
+    ID = send_query(Config, Query),
+    recv_archived_messages(Config, From, To, QID, [5]),
+    RSM = ?match(#rsm_set{} = RSM, recv_fin(Config, ID, QID, NS, false), RSM),
+    match_rsm_count(RSM, 5).
 
 match_rsm_count(#rsm_set{count = undefined}, _) ->
     %% The backend doesn't support counting

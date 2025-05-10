@@ -5,7 +5,7 @@
 %%% Created : 12 May 2013 by Evgeniy Khramtsov <ekhramtsov@process-one.net>
 %%%
 %%%
-%%% ejabberd, Copyright (C) 2013-2022   ProcessOne
+%%% ejabberd, Copyright (C) 2013-2025   ProcessOne
 %%%
 %%% This program is free software; you can redistribute it and/or
 %%% modify it under the terms of the GNU General Public License as
@@ -27,7 +27,7 @@
 
 %% API
 -export([start/0, get/0, set/1, get_log_path/0, flush/0]).
--export([convert_loglevel/1, loglevels/0]).
+-export([convert_loglevel/1, loglevels/0, set_modules_fully_logged/1, config_reloaded/0]).
 -ifndef(LAGER).
 -export([progress_filter/2]).
 -endif.
@@ -185,6 +185,9 @@ restart() ->
     application:stop(lager),
     start(Level).
 
+config_reloaded() ->
+    ok.
+
 reopen_log() ->
     ok.
 
@@ -249,6 +252,8 @@ get_lager_version() ->
 	false -> "0.0.0"
     end.
 
+set_modules_fully_logged(_) -> ok.
+
 flush() ->
     application:stop(lager),
     application:stop(sasl).
@@ -278,7 +283,7 @@ start(Level) ->
 	       burst_limit_window_time => LogBurstLimitWindowTime,
 	       burst_limit_max_count => LogBurstLimitCount},
     FmtConfig = #{legacy_header => false,
-		  time_designator => $ ,
+		  time_designator => $\s,
 		  max_size => 100*1024,
 		  single_line => false},
     FileFmtConfig = FmtConfig#{template => file_template()},
@@ -328,6 +333,27 @@ get_default_handlerid() ->
 restart() ->
     ok.
 
+-spec config_reloaded() -> ok.
+config_reloaded() ->
+    LogRotateSize = ejabberd_option:log_rotate_size(),
+    LogRotateCount = ejabberd_option:log_rotate_count(),
+    LogBurstLimitWindowTime = ejabberd_option:log_burst_limit_window_time(),
+    LogBurstLimitCount = ejabberd_option:log_burst_limit_count(),
+    lists:foreach(
+	fun(Handler) ->
+	    case logger:get_handler_config(Handler) of
+		{ok, #{config := Config}} ->
+		    Config2 = Config#{
+			max_no_bytes => LogRotateSize,
+			max_no_files => LogRotateCount,
+			burst_limit_window_time => LogBurstLimitWindowTime,
+			burst_limit_max_count => LogBurstLimitCount},
+		    logger:update_handler_config(Handler, config, Config2);
+		_ ->
+		    ok
+	    end
+	end, [ejabberd_log, error_log]).
+
 progress_filter(#{level:=info,msg:={report,#{label:={_,progress}}}} = Event, _) ->
     case get() of
 	debug ->
@@ -338,8 +364,29 @@ progress_filter(#{level:=info,msg:={report,#{label:={_,progress}}}} = Event, _) 
 progress_filter(Event, _) ->
     Event.
 
+-ifdef(ELIXIR_ENABLED).
+console_template() ->
+    case (false /= code:is_loaded('Elixir.Logger'))
+        andalso
+        'Elixir.System':version() >= <<"1.15">> of
+        true ->
+            {ok, DC} = logger:get_handler_config(default),
+            MessageFormat = case maps:get(formatter, DC) of
+                %% https://hexdocs.pm/logger/1.17.2/Logger.Formatter.html#module-formatting
+                {'Elixir.Logger.Formatter', _} ->
+                    message;
+                %% https://www.erlang.org/doc/apps/kernel/logger_formatter#t:template/0
+                {logger_formatter, _} ->
+                    msg
+            end,
+            [date, " ", time, " [", level, "] ", MessageFormat, "\n"];
+        false ->
+            [time, " [", level, "] " | msg()]
+    end.
+-else.
 console_template() ->
     [time, " [", level, "] " | msg()].
+-endif.
 
 file_template() ->
     [time, " [", level, "] ", pid,
@@ -377,6 +424,10 @@ set(Level) when ?is_loglevel(Level) ->
 		_ -> xmpp:set_config([{debug, false}])
 	    end
     end.
+
+set_modules_fully_logged(Modules) ->
+    logger:unset_module_level(),
+    logger:set_module_level(Modules, all).
 
 -spec flush() -> ok.
 flush() ->

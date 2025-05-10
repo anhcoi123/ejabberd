@@ -5,7 +5,7 @@
 %%% Created : 20 Mar 2015 by Alexey Shchepin <alexey@process-one.net>
 %%%
 %%%
-%%% ejabberd, Copyright (C) 2002-2022   ProcessOne
+%%% ejabberd, Copyright (C) 2002-2025   ProcessOne
 %%%
 %%% This program is free software; you can redistribute it and/or
 %%% modify it under the terms of the GNU General Public License as
@@ -54,6 +54,8 @@
          oauth_add_client_implicit/3,
          oauth_remove_client/1]).
 
+-export([web_menu_main/2, web_page_main/2]).
+
 -include_lib("xmpp/include/xmpp.hrl").
 -include("logger.hrl").
 -include("ejabberd_http.hrl").
@@ -81,7 +83,7 @@
 get_commands_spec() ->
     [
      #ejabberd_commands{name = oauth_issue_token, tags = [oauth],
-                        desc = "Issue an oauth token for the given jid",
+                        desc = "Issue an OAuth token for the given jid",
                         module = ?MODULE, function = oauth_issue_token,
                         args = [{jid, string},{ttl, integer}, {scopes, string}],
                         policy = restricted,
@@ -91,16 +93,29 @@ get_commands_spec() ->
 				     "List of scopes to allow, separated by ';'"],
                         result = {result, {tuple, [{token, string}, {scopes, string}, {expires_in, string}]}}
                        },
+     #ejabberd_commands{name = oauth_issue_token, tags = [oauth],
+                        desc = "Issue an OAuth token for the given jid",
+                        module = ?MODULE, function = oauth_issue_token,
+                        version = 1,
+                        note = "updated in 24.02",
+                        args = [{jid, string}, {ttl, integer}, {scopes, {list, {scope, binary}}}],
+                        policy = restricted,
+                        args_example = ["user@server.com", 3600, ["connected_users_number", "muc_online_rooms"]],
+                        args_desc = ["Jid for which issue token",
+				     "Time to live of generated token in seconds",
+				     "List of scopes to allow"],
+                        result = {result, {tuple, [{token, string}, {scopes, {list, {scope, string}}}, {expires_in, string}]}}
+                       },
      #ejabberd_commands{name = oauth_list_tokens, tags = [oauth],
-                        desc = "List oauth tokens, user, scope, and seconds to expire (only Mnesia)",
-                        longdesc = "List oauth tokens, their user and scope, and how many seconds remain until expirity",
+                        desc = "List OAuth tokens, user, scope, and seconds to expire (only Mnesia)",
+                        longdesc = "List  _`oauth.md|OAuth`_ tokens, their user and scope, and how many seconds remain until expiry",
                         module = ?MODULE, function = oauth_list_tokens,
                         args = [],
                         policy = restricted,
                         result = {tokens, {list, {token, {tuple, [{token, string}, {user, string}, {scope, string}, {expires_in, string}]}}}}
                        },
      #ejabberd_commands{name = oauth_revoke_token, tags = [oauth],
-                        desc = "Revoke authorization for a token",
+                        desc = "Revoke authorization for an OAuth token",
 			note = "changed in 22.05",
                         module = ?MODULE, function = oauth_revoke_token,
                         args = [{token, binary}],
@@ -109,7 +124,7 @@ get_commands_spec() ->
                         result_desc = "Result code"
                        },
      #ejabberd_commands{name = oauth_add_client_password, tags = [oauth],
-                        desc = "Add OAUTH client_id with password grant type",
+                        desc = "Add OAuth client_id with password grant type",
                         module = ?MODULE, function = oauth_add_client_password,
                         args = [{client_id, binary},
                                 {client_name, binary},
@@ -118,7 +133,7 @@ get_commands_spec() ->
                         result = {res, restuple}
                        },
      #ejabberd_commands{name = oauth_add_client_implicit, tags = [oauth],
-                        desc = "Add OAUTH client_id with implicit grant type",
+                        desc = "Add OAuth client_id with implicit grant type",
                         module = ?MODULE, function = oauth_add_client_implicit,
                         args = [{client_id, binary},
                                 {client_name, binary},
@@ -127,7 +142,7 @@ get_commands_spec() ->
                         result = {res, restuple}
                        },
      #ejabberd_commands{name = oauth_remove_client, tags = [oauth],
-                        desc = "Remove OAUTH client_id",
+                        desc = "Remove OAuth client_id",
                         module = ?MODULE, function = oauth_remove_client,
                         args = [{client_id, binary}],
                         policy = restricted,
@@ -135,8 +150,10 @@ get_commands_spec() ->
                        }
     ].
 
-oauth_issue_token(Jid, TTLSeconds, ScopesString) ->
+oauth_issue_token(Jid, TTLSeconds, [Head|_] = ScopesString) when is_integer(Head) ->
     Scopes = [list_to_binary(Scope) || Scope <- string:tokens(ScopesString, ";")],
+    oauth_issue_token(Jid, TTLSeconds, Scopes);
+oauth_issue_token(Jid, TTLSeconds, Scopes) ->
     try jid:decode(list_to_binary(Jid)) of
         #jid{luser =Username, lserver = Server} ->
             Ctx1 = #oauth_ctx{password = admin_generated},
@@ -215,6 +232,8 @@ init([]) ->
     application:set_env(oauth2, expiry_time, Expire div 1000),
     application:start(oauth2),
     ejabberd_commands:register_commands(get_commands_spec()),
+    ejabberd_hooks:add(webadmin_menu_main, ?MODULE, web_menu_main, 50),
+    ejabberd_hooks:add(webadmin_page_main, ?MODULE, web_page_main, 50),
     ejabberd_hooks:add(config_reloaded, ?MODULE, config_reloaded, 50),
     erlang:send_after(expire(), self(), clean),
     {ok, ok}.
@@ -240,12 +259,15 @@ handle_info(Info, State) ->
     {noreply, State}.
 
 terminate(_Reason, _State) ->
+    ejabberd_hooks:delete(webadmin_menu_main, ?MODULE, web_menu_main, 50),
+    ejabberd_hooks:delete(webadmin_page_main, ?MODULE, web_page_main, 50),
     ejabberd_hooks:delete(config_reloaded, ?MODULE, config_reloaded, 50).
 
 code_change(_OldVsn, State, _Extra) -> {ok, State}.
 
-
-get_client_identity({client, ClientID}, Ctx) ->
+get_client_identity(<<"">>, Ctx) ->
+    {ok, {Ctx, {client, unknown_client}}};
+get_client_identity(ClientID, Ctx) when is_binary(ClientID) ->
     {ok, {Ctx, {client, ClientID}}}.
 
 verify_redirection_uri(_ClientID, RedirectURI, Ctx) ->
@@ -498,6 +520,10 @@ process(_Handlers,
 		 path = [_, <<"authorization_token">>]}) ->
     ResponseType = proplists:get_value(<<"response_type">>, Q, <<"">>),
     ClientId = proplists:get_value(<<"client_id">>, Q, <<"">>),
+    JidEls = case proplists:get_value(<<"jid">>, Q, <<"">>) of
+                <<"">> -> [?INPUTID(<<"email">>, <<"username">>, <<"">>)];
+                Jid -> [?C(Jid), ?INPUT(<<"hidden">>, <<"username">>, Jid)]
+            end,
     RedirectURI = proplists:get_value(<<"redirect_uri">>, Q, <<"">>),
     Scope = proplists:get_value(<<"scope">>, Q, <<"">>),
     State = proplists:get_value(<<"state">>, Q, <<"">>),
@@ -505,8 +531,8 @@ process(_Handlers,
         ?XAE(<<"form">>,
              [{<<"action">>, <<"authorization_token">>},
               {<<"method">>, <<"post">>}],
-             [?LABEL(<<"username">>, [?CT(?T("User (jid)")), ?C(<<": ">>)]),
-              ?INPUTID(<<"email">>, <<"username">>, <<"">>),
+             [?LABEL(<<"username">>, [?CT(?T("User (jid)")), ?C(<<": ">>)])
+             ] ++ JidEls ++ [
               ?BR,
               ?LABEL(<<"password">>, [?CT(?T("Password")), ?C(<<": ">>)]),
               ?INPUTID(<<"password">>, <<"password">>, <<"">>),
@@ -569,61 +595,71 @@ process(_Handlers,
     RedirectURI = proplists:get_value(<<"redirect_uri">>, Q, <<"">>),
     SScope = proplists:get_value(<<"scope">>, Q, <<"">>),
     StringJID = proplists:get_value(<<"username">>, Q, <<"">>),
-    #jid{user = Username, server = Server} = jid:decode(StringJID),
-    Password = proplists:get_value(<<"password">>, Q, <<"">>),
-    State = proplists:get_value(<<"state">>, Q, <<"">>),
-    Scope = str:tokens(SScope, <<" ">>),
-    TTL = proplists:get_value(<<"ttl">>, Q, <<"">>),
-    ExpiresIn = case TTL of
-                    <<>> -> undefined;
-                    _ -> binary_to_integer(TTL)
-                end,
-    case oauth2:authorize_password({Username, Server},
-                                   ClientId,
-                                   RedirectURI,
-                                   Scope,
-                                   #oauth_ctx{password = Password}) of
-        {ok, {_AppContext, Authorization}} ->
-            {ok, {_AppContext2, Response}} =
-                oauth2:issue_token(Authorization, [{expiry_time, ExpiresIn} || ExpiresIn /= undefined ]),
-            {ok, AccessToken} = oauth2_response:access_token(Response),
-            {ok, Type} = oauth2_response:token_type(Response),
-            %%Ugly: workardound to return the correct expirity time, given than oauth2 lib doesn't really have
-            %%per-case expirity time.
-            Expires = case ExpiresIn of
-                          undefined ->
-                             {ok, Ex} = oauth2_response:expires_in(Response),
-                             Ex;
-                          _ ->
-                            ExpiresIn
-                      end,
-            {ok, VerifiedScope} = oauth2_response:scope(Response),
-            %oauth2_wrq:redirected_access_token_response(ReqData,
-            %                                            RedirectURI,
-            %                                            AccessToken,
-            %                                            Type,
-            %                                            Expires,
-            %                                            VerifiedScope,
-            %                                            State,
-            %                                            Context);
-            {302, [{<<"Location">>,
-                    <<RedirectURI/binary,
-                     "?access_token=", AccessToken/binary,
-                     "&token_type=", Type/binary,
-                     "&expires_in=", (integer_to_binary(Expires))/binary,
-                     "&scope=", (str:join(VerifiedScope, <<" ">>))/binary,
-                     "&state=", State/binary>>
-                   }],
-             ejabberd_web:make_xhtml([?XC(<<"h1">>, <<"302 Found">>)])};
-        {error, Error} when is_atom(Error) ->
-            %oauth2_wrq:redirected_error_response(
-            %    ReqData, RedirectURI, Error, State, Context)
-            {302, [{<<"Location">>,
-                    <<RedirectURI/binary,
-                     "?error=", (atom_to_binary(Error, utf8))/binary,
-                     "&state=", State/binary>>
-                   }],
-             ejabberd_web:make_xhtml([?XC(<<"h1">>, <<"302 Found">>)])}
+    try jid:decode(StringJID) of
+        #jid{user = Username, server = Server} ->
+            Password = proplists:get_value(<<"password">>, Q, <<"">>),
+            State = proplists:get_value(<<"state">>, Q, <<"">>),
+            Scope = str:tokens(SScope, <<" ">>),
+            TTL = proplists:get_value(<<"ttl">>, Q, <<"">>),
+            ExpiresIn = case TTL of
+                            <<>> -> undefined;
+                            _ -> binary_to_integer(TTL)
+                        end,
+            case oauth2:authorize_password({Username, Server},
+                                           ClientId,
+                                           RedirectURI,
+                                           Scope,
+                                           #oauth_ctx{password = Password}) of
+                {ok, {_AppContext, Authorization}} ->
+                    {ok, {_AppContext2, Response}} =
+                        oauth2:issue_token(Authorization, [{expiry_time, ExpiresIn} || ExpiresIn /= undefined]),
+                    {ok, AccessToken} = oauth2_response:access_token(Response),
+                    {ok, Type} = oauth2_response:token_type(Response),
+                    %%Ugly: workardound to return the correct expirity time, given than oauth2 lib doesn't really have
+                    %%per-case expirity time.
+                    Expires = case ExpiresIn of
+                                  undefined ->
+                                      {ok, Ex} = oauth2_response:expires_in(Response),
+                                      Ex;
+                                  _ ->
+                                      ExpiresIn
+                              end,
+                    {ok, VerifiedScope} = oauth2_response:scope(Response),
+                    %oauth2_wrq:redirected_access_token_response(ReqData,
+                    %                                            RedirectURI,
+                    %                                            AccessToken,
+                    %                                            Type,
+                    %                                            Expires,
+                    %                                            VerifiedScope,
+                    %                                            State,
+                    %                                            Context);
+                    {302, [{<<"Location">>,
+                            <<RedirectURI/binary,
+                              "?access_token=", AccessToken/binary,
+                              "&token_type=", Type/binary,
+                              "&expires_in=", (integer_to_binary(Expires))/binary,
+                              "&scope=", (str:join(VerifiedScope, <<" ">>))/binary,
+                              "&state=", State/binary>>
+                           }],
+                     ejabberd_web:make_xhtml([?XC(<<"h1">>, <<"302 Found">>)])};
+                {error, Error} when is_atom(Error) ->
+                    %oauth2_wrq:redirected_error_response(
+                    %    ReqData, RedirectURI, Error, State, Context)
+                    {302, [{<<"Location">>,
+                            <<RedirectURI/binary,
+                              "?error=", (atom_to_binary(Error, utf8))/binary,
+                              "&state=", State/binary>>
+                           }],
+                     ejabberd_web:make_xhtml([?XC(<<"h1">>, <<"302 Found">>)])}
+            end
+    catch _:{bad_jid, _} ->
+        State = proplists:get_value(<<"state">>, Q, <<"">>),
+        {400, [{<<"Location">>,
+                <<RedirectURI/binary,
+                  "?error=invalid_request",
+                  "&state=", State/binary>>
+               }],
+         ejabberd_web:make_xhtml([?XC(<<"h1">>, <<"400 Invalid request">>)])}
     end;
 process(_Handlers,
 	#request{method = 'POST', q = Q, lang = _Lang,
@@ -675,39 +711,42 @@ process(_Handlers,
         password ->
             SScope = proplists:get_value(<<"scope">>, Q, <<"">>),
             StringJID = proplists:get_value(<<"username">>, Q, <<"">>),
-            #jid{user = Username, server = Server} = jid:decode(StringJID),
-            Password = proplists:get_value(<<"password">>, Q, <<"">>),
-            Scope = str:tokens(SScope, <<" ">>),
-            TTL = proplists:get_value(<<"ttl">>, Q, <<"">>),
-            ExpiresIn = case TTL of
-                            <<>> -> undefined;
-                            _ -> binary_to_integer(TTL)
-                        end,
-            case oauth2:authorize_password({Username, Server},
-                                           Scope,
-                                           #oauth_ctx{password = Password}) of
-                {ok, {_AppContext, Authorization}} ->
-                    {ok, {_AppContext2, Response}} =
-                        oauth2:issue_token(Authorization, [{expiry_time, ExpiresIn} || ExpiresIn /= undefined ]),
-                    {ok, AccessToken} = oauth2_response:access_token(Response),
-                    {ok, Type} = oauth2_response:token_type(Response),
-                    %%Ugly: workardound to return the correct expirity time, given than oauth2 lib doesn't really have
-                    %%per-case expirity time.
-                    Expires = case ExpiresIn of
-                                  undefined ->
-                                      {ok, Ex} = oauth2_response:expires_in(Response),
-                                      Ex;
-                                  _ ->
-                                      ExpiresIn
-                              end,
-                    {ok, VerifiedScope} = oauth2_response:scope(Response),
-                    json_response(200, {[
-                                         {<<"access_token">>, AccessToken},
-                                         {<<"token_type">>, Type},
-                                         {<<"scope">>, str:join(VerifiedScope, <<" ">>)},
-                                         {<<"expires_in">>, Expires}]});
-                {error, Error} when is_atom(Error) ->
-                    json_error(400, <<"invalid_grant">>, Error)
+            try jid:decode(StringJID) of
+                #jid{user = Username, server = Server} ->
+                    Password = proplists:get_value(<<"password">>, Q, <<"">>),
+                    Scope = str:tokens(SScope, <<" ">>),
+                    TTL = proplists:get_value(<<"ttl">>, Q, <<"">>),
+                    ExpiresIn = case TTL of
+                                    <<>> -> undefined;
+                                    _ -> binary_to_integer(TTL)
+                                end,
+                    case oauth2:authorize_password({Username, Server},
+                                                   Scope,
+                                                   #oauth_ctx{password = Password}) of
+                        {ok, {_AppContext, Authorization}} ->
+                            {ok, {_AppContext2, Response}} =
+                                oauth2:issue_token(Authorization, [{expiry_time, ExpiresIn} || ExpiresIn /= undefined]),
+                            {ok, AccessToken} = oauth2_response:access_token(Response),
+                            {ok, Type} = oauth2_response:token_type(Response),
+                            %%Ugly: workardound to return the correct expirity time, given than oauth2 lib doesn't really have
+                            %%per-case expirity time.
+                            Expires = case ExpiresIn of
+                                          undefined ->
+                                              {ok, Ex} = oauth2_response:expires_in(Response),
+                                              Ex;
+                                          _ ->
+                                              ExpiresIn
+                                      end,
+                            {ok, VerifiedScope} = oauth2_response:scope(Response),
+                            json_response(200, #{<<"access_token">> => AccessToken,
+                                                 <<"token_type">> => Type,
+                                                 <<"scope">> => str:join(VerifiedScope, <<" ">>),
+                                                 <<"expires_in">> => Expires});
+                        {error, Error} when is_atom(Error) ->
+                            json_error(400, <<"invalid_grant">>, Error)
+                    end
+            catch _:{bad_jid, _} ->
+                json_error(400, <<"invalid_request">>, invalid_jid)
             end;
         unsupported_grant_type ->
             json_error(400, <<"unsupported_grant_type">>,
@@ -736,19 +775,21 @@ json_response(Code, Body) ->
     {Code, [{<<"Content-Type">>, <<"application/json;charset=UTF-8">>},
            {<<"Cache-Control">>, <<"no-store">>},
            {<<"Pragma">>, <<"no-cache">>}],
-     jiffy:encode(Body)}.
+     misc:json_encode(Body)}.
 
 %% OAauth error are defined in:
 %% https://tools.ietf.org/html/draft-ietf-oauth-v2-25#section-5.2
 json_error(Code, Error, Reason) ->
     Desc = json_error_desc(Reason),
-    Body = {[{<<"error">>, Error},
-             {<<"error_description">>, Desc}]},
+    Body = #{<<"error">> => Error,
+             <<"error_description">> => Desc},
     json_response(Code, Body).
 
 json_error_desc(access_denied)          -> <<"Access denied">>;
+json_error_desc(badpass)                -> <<"Bad password">>;
 json_error_desc(unsupported_grant_type) -> <<"Unsupported grant type">>;
-json_error_desc(invalid_scope)          -> <<"Invalid scope">>.
+json_error_desc(invalid_scope)          -> <<"Invalid scope">>;
+json_error_desc(invalid_jid)            -> <<"Invalid JID">>.
 
 web_head() ->
     [?XA(<<"meta">>, [{<<"http-equiv">>, <<"X-UA-Compatible">>},
@@ -774,3 +815,30 @@ logo() ->
 	{error, _} ->
 	    <<>>
     end.
+
+%%%
+%%% WebAdmin
+%%%
+
+%% @format-begin
+
+web_menu_main(Acc, _Lang) ->
+    Acc ++ [{<<"oauth">>, <<"OAuth">>}].
+
+web_page_main(_, #request{path = [<<"oauth">>]} = R) ->
+    Head = ?H1GLraw(<<"OAuth">>, <<"developer/ejabberd-api/oauth/">>, <<"OAuth">>),
+    Set = [?X(<<"hr">>),
+           ?XAC(<<"h2">>, [{<<"id">>, <<"token">>}], <<"Token">>),
+           ?XE(<<"blockquote">>,
+               [ejabberd_web_admin:make_command(oauth_list_tokens, R),
+                ejabberd_web_admin:make_command(oauth_issue_token, R),
+                ejabberd_web_admin:make_command(oauth_revoke_token, R)]),
+           ?X(<<"hr">>),
+           ?XAC(<<"h2">>, [{<<"id">>, <<"client">>}], <<"Client">>),
+           ?XE(<<"blockquote">>,
+               [ejabberd_web_admin:make_command(oauth_add_client_implicit, R),
+                ejabberd_web_admin:make_command(oauth_add_client_password, R),
+                ejabberd_web_admin:make_command(oauth_remove_client, R)])],
+    {stop, Head ++ Set};
+web_page_main(Acc, _) ->
+    Acc.
